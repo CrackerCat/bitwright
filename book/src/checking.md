@@ -89,6 +89,44 @@ assert!(prove::rule_all_widths(absorb, 64, &Config::default())?.every_width);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### Asking in steps
+
+`prove::valid`, `valid_under` and `equal` answer `Proved`, `Refuted` with a counterexample, or
+`Unknown` with the reason: `Budget` (the search reached `max_conflicts` or `max_propagations`; a
+larger budget may decide it), `TooLarge` (the circuit passed `max_nodes`, whatever the budget)
+or `Unsupported`. A caller that retries undecided questions under larger budgets keeps a
+`prove::Question` instead. The question is simplified, blasted and encoded once, and each
+`solve` goes on where the last one stopped, learned clauses included. Asking under 5,000
+conflicts and then 15,000 more does what asking under 20,000 once does.
+
+Proofs usually close early, and refutations take the search longest. Before searching, the
+prover evaluates the circuit on `Config::samples` assignments (256 by default). A refutation
+that many values give is found there, with no clauses built. `Question::stats` reports the
+work so far: nodes, samples, variables and clauses, conflicts, decisions and propagations.
+Propagations bound time more closely than conflicts do, since a conflict costs more
+propagation on a larger circuit.
+
+```rust
+use bitwright::prove::{Config, Limits, Outcome, Question, Unknown};
+use bitwright::{Context, ParseOptions, Width};
+
+let mut cx = Context::new();
+let o = ParseOptions::width(Width::W32);
+let p = cx.parse("x * (y | 1) != 0x9e3779b1", &o)?;
+let cfg = Config::default().with_samples(0).with_max_nodes(2_000_000);
+let mut q = Question::valid(&mut cx, p, &cfg)?;
+let mut budget = 10;
+let answer = loop {
+    match q.solve(&mut cx, Limits::conflicts(budget))? {
+        Outcome::Unknown(Unknown::Budget { .. }) => budget *= 2,
+        other => break other,
+    }
+};
+assert!(matches!(answer, Outcome::Refuted(_))); // y = 0x9e3779b1 * x⁻¹, for any odd x
+assert!(q.stats().conflicts > 10);
+# Ok::<(), bitwright::Error>(())
+```
+
 ### Rules as Lean theorems
 
 `bitwright lean rules.bwr` (`rules::lean::lean`) writes the rules as Lean 4 theorems over

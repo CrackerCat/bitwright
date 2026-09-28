@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- **Prover questions decided in steps, with the reason and the work reported** (issue #11).
+  - **`prove::Question`** is a question simplified, blasted and encoded once, then solved
+    under as many budgets as its caller likes (`Question::solve(cx, Limits)`). A search that
+    stops on its limits keeps its trail, learned clauses and restart schedule, so 5,000
+    conflicts and then 15,000 more do exactly what 20,000 do in one call. Escalating a budget
+    no longer pays for simplification, blasting, encoding and the search again.
+    `valid`, `valid_under` and `equal` are one step of one.
+  - **Breaking: `Outcome::Unknown` holds a `prove::Unknown`**, not a `String`:
+    `Budget { conflicts, propagations }` (a larger budget may decide it), `TooLarge { nodes }`
+    (the same under any search budget with that `max_nodes`) or `Unsupported(reason)`.
+    `Unknown` prints the old messages. `RuleOutcome::Unknown` and `satisfy`'s error are the
+    same type.
+  - **`prove::Stats`** (`Question::stats`) reports the AIG nodes, samples, CNF variables and
+    clauses, learned clauses kept, and conflicts, decisions and propagations.
+  - **`Config::max_propagations`**, a deterministic budget that tracks time more closely
+    than conflicts do: a conflict costs more propagation on a larger circuit. At 10,000
+    conflicts, eight queries of one family took 11.6 to 56.9 million propagations and 0.8 to
+    6.9 s.
+  - **Sampling before the search (`Config::samples`, 256 by default).** The circuit is
+    evaluated on 64 assignments at a time from a fixed seed. An assignment that refutes the
+    question is its counterexample (checked by evaluation, as the solver's are), found with no
+    clauses built. On queries of the issue's shape that a sixteenth of the values refute, the
+    search took 5 to 40 s to find a refutation; the first 64 samples find it in milliseconds.
+- **A faster SAT solver and a smaller encoding.**
+  - Clauses in one arena, binary clauses (most of a circuit's clauses) in watch lists of
+    their own, deleted clauses collected. A restart keeps the decisions the search would take
+    again (trail reuse), so it does not propagate a large circuit from the top.
+  - The CNF encoding recognizes exclusive ors and multiplexers (one variable and four clauses
+    each, not three variables and nine) and trees of and-gates (one variable). A circuit of
+    1.65 M AIG nodes has 0.92 M variables, where it had 1.6 M. The clauses are kept only for a
+    certificate. The full adder's carry folds constant and repeated inputs.
+  - Three 1.65 M-node queries of the issue's shape, at 5,000 conflicts each, took 7.0 s in
+    all, down from 12.8 s, and peak memory fell from 1.09 GB to 510 MB. Multiplier MBA
+    identities at 6 to 8 bits, proved by SAT alone, took 108 s in all, down from 144.5 s.
+    The time a search takes still varies widely with its path: a search that has assigned
+    most of a large circuit may propagate a large part of it again at every conflict.
+- **The `prove` feature builds without `check`.**
 - **The compiler integration in the C, C++, Python and JavaScript APIs** (issue #9): what 0.12.0
   added to the Rust API.
   - **The compile strategy.** `BW_PRESET_COMPILE`, `Engine::compile()` (C++),

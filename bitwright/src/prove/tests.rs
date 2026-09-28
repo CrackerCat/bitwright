@@ -2,7 +2,7 @@
 //! against bitwright's evaluator on every operator, and proofs and refutations end to end.
 
 use super::aig::Aig;
-use super::sat::{Answer, Lit, Solver, Step};
+use super::sat::{Answer, Limits, Lit, Solver, Step};
 use super::*;
 use crate::testutil::{Gen, Rng};
 use crate::{BinOp, CmpOpExt, ParseOptions, UnOp};
@@ -563,4 +563,227 @@ fn rule_obligations() {
     assert_eq!(report.proved, (2..=6).map(|w| vec![w]).collect::<Vec<_>>());
     let report = rule_all_widths(bad, 6, &cfg).unwrap();
     assert!(report.refuted.is_some());
+}
+
+/// Random 3-SAT near the threshold (`n` variables), and pigeonhole (`n + 1` pigeons).
+fn three_sat(rng: &mut Rng, n: u32) -> Vec<Vec<Lit>> {
+    (0..(f64::from(n) * 4.26) as usize)
+        .map(|_| {
+            (0..3)
+                .map(|_| Lit::new(rng.below(u64::from(n)) as u32, rng.chance(1, 2)))
+                .collect()
+        })
+        .collect()
+}
+
+fn pigeonhole(n: u32) -> Vec<Vec<Lit>> {
+    let var = |p: u32, h: u32| p * n + h;
+    let mut clauses: Vec<Vec<Lit>> = (0..=n)
+        .map(|p| (0..n).map(|h| Lit::pos(var(p, h))).collect())
+        .collect();
+    for h in 0..n {
+        for p in 0..=n {
+            for q in p + 1..=n {
+                clauses.push(vec![Lit::neg(var(p, h)), Lit::neg(var(q, h))]);
+            }
+        }
+    }
+    clauses
+}
+
+/// A search stopped on its limits goes on where it stopped: in steps of a few conflicts (or
+/// propagations) it meets the same conflicts, makes the same decisions and propagations, logs
+/// the same proof and gives the same answer as in one call, through restarts, reductions and
+/// collections of the learned clauses.
+#[test]
+fn a_resumed_search_is_the_search_it_continues() {
+    let mut rng = Rng(0x11);
+    let mut cases: Vec<Vec<Vec<Lit>>> = (0..8).map(|_| three_sat(&mut rng, 150)).collect();
+    cases.push(pigeonhole(7));
+    let (mut long, mut sat, mut unsat) = (0, 0, 0);
+    for clauses in &cases {
+        let fresh = || {
+            let mut s = Solver::new();
+            s.log_proof();
+            for c in clauses {
+                s.add_clause(c);
+            }
+            s
+        };
+        let mut whole = fresh();
+        let want = whole.solve(u64::MAX);
+        let want_proof = whole.take_proof().unwrap();
+        for step in [
+            Limits::conflicts(7),
+            Limits {
+                conflicts: u64::MAX,
+                propagations: 500,
+            },
+        ] {
+            let mut s = fresh();
+            let got = loop {
+                let (c0, p0) = (s.conflicts, s.propagations);
+                let a = s.solve_within(step);
+                assert!(s.conflicts - c0 <= step.conflicts);
+                // A limit on propagations is checked between propagations of whole literals'
+                // clauses, so a call may pass it by one literal's worth.
+                assert!(s.propagations - p0 <= step.propagations.saturating_add(90));
+                if a != Answer::Unknown {
+                    break a;
+                }
+            };
+            assert_eq!(got, want);
+            assert_eq!(
+                (s.conflicts, s.decisions, s.propagations),
+                (whole.conflicts, whole.decisions, whole.propagations)
+            );
+            assert_eq!(s.take_proof().unwrap(), want_proof);
+        }
+        // The learned clauses are reduced (and collected) every 2,000 conflicts or more.
+        long += u32::from(whole.conflicts > 2000);
+        match want {
+            Answer::Sat(m) => {
+                sat += 1;
+                for c in clauses {
+                    assert!(c.iter().any(|l| m[l.var() as usize] != l.is_neg()));
+                }
+            }
+            Answer::Unsat => {
+                unsat += 1;
+                drup::check(clauses, &want_proof).unwrap();
+            }
+            Answer::Unknown => unreachable!(),
+        }
+    }
+    // Long enough to reduce and collect the learned clauses, with both answers.
+    assert!(long >= 2 && sat >= 2 && unsat >= 2, "{long} {sat} {unsat}");
+}
+
+/// Encoded with its gates recognized, a circuit's clauses are satisfiable with a root true
+/// exactly when some input makes it true (every input tried), and a model's inputs do: on random
+/// circuits of exclusive ors, multiplexers and trees of and-gates, sharing nodes between roots.
+/// An exclusive or is one variable.
+#[test]
+fn encoded_circuits_agree_with_evaluation() {
+    use super::aig::{Cnf, L};
+    let mut rng = Rng(0xc1f);
+    for _ in 0..400 {
+        let mut g = Aig::new();
+        let ni = 2 + rng.below(5) as u32;
+        let mut lits: Vec<L> = (0..ni).map(|_| g.input()).collect();
+        for _ in 0..3 + rng.below(30) {
+            let mut pick = || lits[rng.below(lits.len() as u64) as usize] ^ rng.below(2) as u32;
+            let (a, b, c) = (pick(), pick(), pick());
+            let x = match rng.below(5) {
+                0 | 1 => g.and(a, b),
+                2 => g.xor(a, b),
+                3 => g.mux(a, b, c),
+                _ => g.or(a, b),
+            };
+            lits.push(x);
+        }
+        let roots = [
+            lits[lits.len() - 1],
+            lits[ni as usize + rng.below(lits.len() as u64 - u64::from(ni)) as usize] ^ 1,
+        ];
+        for &r in &roots {
+            let holds_somewhere = (0..1u32 << ni).any(|a| {
+                let vals = g.eval_all(|k| (a >> k) & 1 == 1);
+                Aig::value(&vals, r)
+            });
+            let mut s = Solver::new();
+            let mut cnf = Cnf::encode(&g, &roots, &mut s, true);
+            assert!(cnf.emitted() == cnf.clauses.len());
+            cnf.assert(r, &mut s);
+            match s.solve(u64::MAX) {
+                Answer::Sat(m) => {
+                    assert!(holds_somewhere);
+                    let vals = g.eval_all(|k| cnf.value(lits[k as usize], &m));
+                    assert!(Aig::value(&vals, r));
+                }
+                Answer::Unsat => assert!(!holds_somewhere),
+                Answer::Unknown => unreachable!(),
+            }
+        }
+    }
+    let mut g = Aig::new();
+    let (a, b) = (g.input(), g.input());
+    let x = g.xor(a, b);
+    let mut s = Solver::new();
+    let cnf = Cnf::encode(&g, &[x], &mut s, false);
+    assert_eq!((g.len(), s.num_vars(), cnf.emitted()), (6, 3, 4));
+}
+
+/// A question decided in steps answers what one call does, with the same counterexample and work;
+/// an undecided one says why (a budget it may pass, a circuit too large for any), and the
+/// answer, once found, is kept.
+#[test]
+fn questions_resume_and_say_why_they_are_undecided() {
+    let o = ParseOptions::width(Width::W32);
+    let cfg = Config::default().with_samples(0).with_simplify(false);
+    // x * y is never this odd constant: false, and the search needs a while to invert it.
+    let claim = "x * (y | 1) != 0x9e3779b1";
+    let mut cx = Context::new();
+    let p = cx.parse(claim, &o).unwrap();
+    let mut q = Question::valid(&mut cx, p, &cfg).unwrap();
+    let mut steps = 0;
+    let stepped = loop {
+        steps += 1;
+        match q.solve(&mut cx, Limits::conflicts(20)).unwrap() {
+            Outcome::Unknown(why) => {
+                let Unknown::Budget { conflicts, .. } = why else {
+                    panic!("{why}")
+                };
+                assert_eq!(conflicts, q.stats().conflicts);
+                assert!(why.is_budget() && why.to_string().contains("conflicts"));
+            }
+            o => break o,
+        }
+    };
+    assert!(steps > 3, "{steps}");
+    let Outcome::Refuted(m) = &stepped else {
+        panic!("{stepped:?}")
+    };
+    let st = q.stats();
+    assert!(st.nodes > 0 && st.vars > 0 && st.clauses > 0 && st.propagations > 0);
+    // Once decided, the answer again, without more work.
+    assert!(
+        matches!(q.solve(&mut cx, Limits::conflicts(0)).unwrap(), Outcome::Refuted(n) if n == *m)
+    );
+    assert_eq!(q.stats(), st);
+    // One call with the whole budget: the same counterexample, and the same work.
+    let mut cx2 = Context::new();
+    let p2 = cx2.parse(claim, &o).unwrap();
+    let mut q2 = Question::valid(&mut cx2, p2, &cfg).unwrap();
+    let once = q2.solve(&mut cx2, Limits::conflicts(steps * 20)).unwrap();
+    assert!(matches!(&once, Outcome::Refuted(n) if n == m));
+    assert_eq!(q2.stats(), st);
+    // A propagation limit stops the search as well.
+    let mut cx3 = Context::new();
+    let p3 = cx3.parse(claim, &o).unwrap();
+    let few = cfg.with_max_propagations(2_000);
+    let Outcome::Unknown(Unknown::Budget { propagations, .. }) = valid(&mut cx3, p3, &few).unwrap()
+    else {
+        panic!("decided within 2,000 propagations")
+    };
+    assert!((2_000..3_000).contains(&propagations), "{propagations}");
+
+    // Too large under the node cap: the same under any budget, and before any search.
+    let small = cfg.with_max_nodes(500);
+    for conflicts in [1, 1_000_000] {
+        let q = Question::valid(&mut cx, p, &small.with_max_conflicts(conflicts)).unwrap();
+        let Some(Outcome::Unknown(Unknown::TooLarge { nodes })) = q.outcome() else {
+            panic!("{:?}", q.outcome())
+        };
+        assert!(*nodes > 500 && q.stats().vars == 0);
+    }
+
+    // A refutation that many values give is found by sampling, with no clauses.
+    let e = cx.parse("(x & 0xff) != 0x5a", &o).unwrap();
+    let q = Question::valid(&mut cx, e, &Config::default().with_simplify(false)).unwrap();
+    assert!(matches!(q.outcome(), Some(Outcome::Refuted(_))));
+    assert!(q.stats().samples > 0 && q.stats().vars == 0);
+    let Outcome::Refuted(_) = valid(&mut cx, e, &cfg).unwrap() else {
+        panic!("not refuted")
+    };
 }
