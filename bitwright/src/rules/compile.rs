@@ -2292,7 +2292,7 @@ fn width_domain(vars: usize) -> Vec<u16> {
 
 /// The width assignments of the rule's variables over [`width_domain`] that satisfy the
 /// constraints, each with every assignment of its rounding-mode variables after the widths.
-#[cfg_attr(not(feature = "check"), allow(dead_code))] // the checker's
+#[cfg_attr(not(feature = "prove"), allow(dead_code))] // the prover's
 pub(crate) fn width_assignments(rule: &Rule) -> Vec<Vec<u16>> {
     let mut out = Vec::new();
     for_each_assignment(rule, |ws| {

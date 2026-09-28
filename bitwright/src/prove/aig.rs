@@ -129,6 +129,23 @@ impl Aig {
 
     /// The majority of three (a full adder's carry).
     pub fn maj(&mut self, a: L, b: L, c: L) -> L {
+        // A constant makes it a conjunction or a disjunction of the others, and two operands
+        // equal or opposite decide it (comparisons with a constant and additions of one meet
+        // these at every bit).
+        for (k, x, y) in [(a, b, c), (b, a, c), (c, a, b)] {
+            if k == FALSE {
+                return self.and(x, y);
+            }
+            if k == TRUE {
+                return self.or(x, y);
+            }
+            if x == y {
+                return x;
+            }
+            if x == y ^ 1 {
+                return k;
+            }
+        }
         let ab = self.and(a, b);
         let ac = self.and(a, c);
         let bc = self.and(b, c);
@@ -205,86 +222,200 @@ impl Aig {
     }
 }
 
-/// The clauses of an AIG's goals for a SAT solver: a variable per reached node (inputs keep
-/// theirs for reading models back).
+/// The clauses of an AIG's goals for a SAT solver: a variable per node the clauses need
+/// (inputs keep theirs for reading models back).
+///
+/// Gates are recognized before encoding (Tseitin's, with gate detection; see Eén, Mishchenko
+/// and Sörensson, "Applying Logic Synthesis for Speeding Up SAT", 2007): an exclusive or or a
+/// multiplexer (three and-gates, the inner two used nowhere else) is one variable and four
+/// clauses, not three variables and nine; and a tree of and-gates, the inner ones used nowhere
+/// else, is one variable and a clause per input plus one. Fewer variables and clauses make
+/// every propagation cheaper, and the circuits of adders and multipliers are made of these.
 #[derive(Debug)]
 pub struct Cnf {
-    /// AIG node → solver variable.
-    var: HashMap<u32, u32>,
-    /// The clauses, as given to the solver (kept for the proof checker).
+    /// AIG node → solver variable (`NONE` for a node without one).
+    var: Vec<u32>,
+    /// The clauses, as given to the solver, when kept (for a certificate).
     pub clauses: Vec<Vec<Lit>>,
+    keep: bool,
+    emitted: usize,
+}
+
+const NONE: u32 = u32::MAX;
+
+/// How a node that has a variable is encoded.
+enum Gate {
+    /// `x ⊕ y`.
+    Xor(L, L),
+    /// `¬(c ? t : e)`.
+    NotMux(L, L, L),
+    /// The conjunction of `leaves[start..end]`.
+    And(usize, usize),
 }
 
 impl Cnf {
-    /// Tseitin clauses for every gate `roots` reach, added to `solver` (and kept).
-    pub fn encode(aig: &Aig, roots: &[L], solver: &mut Solver) -> Cnf {
-        let mut cnf = Cnf {
-            var: HashMap::new(),
-            clauses: Vec::new(),
-        };
-        let mut stack: Vec<u32> = roots.iter().map(|&l| l >> 1).collect();
-        let mut order: Vec<u32> = Vec::new();
-        let mut state: HashMap<u32, bool> = HashMap::new();
-        while let Some(n) = stack.pop() {
-            match state.get(&n) {
-                Some(true) => continue,
-                Some(false) => {
-                    state.insert(n, true);
-                    order.push(n);
-                    continue;
-                }
-                None => {}
+    /// Clauses for every gate `roots` reach, added to `solver` (and kept in
+    /// [`clauses`](Self::clauses) when `keep`).
+    pub fn encode(aig: &Aig, roots: &[L], solver: &mut Solver, keep: bool) -> Cnf {
+        let n = aig.nodes.len();
+        // Uses of each node within the cone (a root counts as a use, so it keeps its
+        // variable): nodes come after their operands, so one pass down from the top counts them.
+        let mut uses = vec![0u32; n];
+        for &r in roots {
+            uses[(r >> 1) as usize] += 2;
+        }
+        for i in (1..n).rev() {
+            if uses[i] > 0
+                && let Node::And(a, b) = aig.nodes[i]
+            {
+                uses[(a >> 1) as usize] += 1;
+                uses[(b >> 1) as usize] += 1;
             }
-            state.insert(n, false);
-            stack.push(n);
-            if let Node::And(a, b) = aig.nodes[n as usize] {
-                for c in [a >> 1, b >> 1] {
-                    if !state.contains_key(&c) {
-                        stack.push(c);
+        }
+        let inner = |l: L| -> Option<(L, L)> {
+            match aig.nodes[(l >> 1) as usize] {
+                Node::And(a, b) if uses[(l >> 1) as usize] == 1 => Some((a, b)),
+                _ => None,
+            }
+        };
+        // `¬P ∧ ¬Q` with P and Q inner gates: an exclusive or or a multiplexer.
+        let gate2 = |a: L, b: L| -> Option<Gate> {
+            if a & 1 == 0 || b & 1 == 0 {
+                return None;
+            }
+            let ((p0, p1), (q0, q1)) = (inner(a)?, inner(b)?);
+            if (q0 == p0 ^ 1 && q1 == p1 ^ 1) || (q0 == p1 ^ 1 && q1 == p0 ^ 1) {
+                // P ∨ Q = (p0 ↔ p1).
+                return Some(Gate::Xor(p0, p1));
+            }
+            for (c, t) in [(p0, p1), (p1, p0)] {
+                for (d, e) in [(q0, q1), (q1, q0)] {
+                    if d == c ^ 1 {
+                        return Some(Gate::NotMux(c, t, e));
                     }
                 }
             }
+            None
+        };
+        // Which nodes get a variable, and how each is encoded: from the top down, a node's
+        // users are decided before it.
+        let mut need = vec![false; n];
+        for &r in roots {
+            need[(r >> 1) as usize] = true;
         }
-        for n in order {
-            let v = solver.new_var();
-            cnf.var.insert(n, v);
-            match aig.nodes[n as usize] {
-                Node::Const => cnf.push(solver, &[Lit::neg(v)]),
-                Node::Input => {}
-                Node::And(a, b) => {
-                    let (la, lb) = (cnf.lit(a), cnf.lit(b));
-                    let g = Lit::pos(v);
-                    cnf.push(solver, &[!g, la]);
-                    cnf.push(solver, &[!g, lb]);
-                    cnf.push(solver, &[g, !la, !lb]);
+        let mut gates: Vec<(u32, Gate)> = Vec::new();
+        let mut leaves: Vec<L> = Vec::new();
+        let mut stack = Vec::new();
+        for i in (1..n).rev() {
+            if !need[i] {
+                continue;
+            }
+            let Node::And(a, b) = aig.nodes[i] else {
+                continue;
+            };
+            let gate = gate2(a, b).unwrap_or_else(|| {
+                // The inputs of the tree of and-gates under `i`.
+                let start = leaves.len();
+                stack.extend([b, a]);
+                while let Some(l) = stack.pop() {
+                    match inner(l) {
+                        Some((x, y)) if l & 1 == 0 && gate2(x, y).is_none() => {
+                            stack.extend([y, x]);
+                        }
+                        _ => leaves.push(l),
+                    }
+                }
+                Gate::And(start, leaves.len())
+            });
+            let operands: &[L] = match &gate {
+                Gate::Xor(x, y) => &[*x, *y],
+                Gate::NotMux(c, t, e) => &[*c, *t, *e],
+                Gate::And(s, e) => &leaves[*s..*e],
+            };
+            for &l in operands {
+                need[(l >> 1) as usize] = true;
+            }
+            gates.push((i as u32, gate));
+        }
+        let mut cnf = Cnf {
+            var: vec![NONE; n],
+            clauses: Vec::new(),
+            keep,
+            emitted: 0,
+        };
+        for (i, _) in need.iter().enumerate().filter(|(_, n)| **n) {
+            cnf.var[i] = solver.new_var();
+        }
+        if need[0] {
+            let f = cnf.lit(FALSE);
+            cnf.push(solver, &[!f]);
+        }
+        let mut long = Vec::new();
+        for (i, gate) in gates.into_iter().rev() {
+            let g = Lit::pos(cnf.var[i as usize]);
+            match gate {
+                Gate::Xor(x, y) => {
+                    let (x, y) = (cnf.lit(x), cnf.lit(y));
+                    cnf.push(solver, &[!g, x, y]);
+                    cnf.push(solver, &[!g, !x, !y]);
+                    cnf.push(solver, &[g, !x, y]);
+                    cnf.push(solver, &[g, x, !y]);
+                }
+                Gate::NotMux(c, t, e) => {
+                    let (c, t, e) = (cnf.lit(c), cnf.lit(t), cnf.lit(e));
+                    // g = ¬(c ? t : e).
+                    cnf.push(solver, &[!c, !t, !g]);
+                    cnf.push(solver, &[!c, t, g]);
+                    cnf.push(solver, &[c, !e, !g]);
+                    cnf.push(solver, &[c, e, g]);
+                }
+                Gate::And(s, e) => {
+                    long.clear();
+                    long.push(g);
+                    for &l in &leaves[s..e] {
+                        let x = cnf.lit(l);
+                        cnf.push(solver, &[!g, x]);
+                        long.push(!x);
+                    }
+                    cnf.push(solver, &long);
                 }
             }
         }
         cnf
     }
 
+    /// The number of clauses given to the solver.
+    pub fn emitted(&self) -> usize {
+        self.emitted
+    }
+
     fn push(&mut self, solver: &mut Solver, c: &[Lit]) {
-        self.clauses.push(c.to_vec());
+        self.emitted += 1;
+        if self.keep {
+            self.clauses.push(c.to_vec());
+        }
         solver.add_clause(c);
     }
 
-    /// The solver literal of an AIG literal (its node must have been encoded).
+    /// The solver literal of an AIG literal (its node must have a variable: a root's does).
     pub fn lit(&self, l: L) -> Lit {
-        let v = self.var[&(l >> 1)];
+        let v = self.var[(l >> 1) as usize];
+        debug_assert_ne!(v, NONE, "a node without a variable");
         Lit::new(v, l & 1 == 0)
     }
 
-    /// Asserts an AIG literal.
+    /// Asserts an AIG literal (a root's).
     pub fn assert(&mut self, l: L, solver: &mut Solver) {
         let x = self.lit(l);
         self.push(solver, &[x]);
     }
 
-    /// The value of an AIG literal in a model (inputs not reached are false).
+    /// The value of an AIG literal in a model: an input's, or a root's (inputs not reached
+    /// are false).
     pub fn value(&self, l: L, model: &[bool]) -> bool {
-        let v = match self.var.get(&(l >> 1)) {
-            Some(&v) => model.get(v as usize).copied().unwrap_or(false),
-            None => false,
+        let v = match self.var.get((l >> 1) as usize) {
+            Some(&v) if v != NONE => model.get(v as usize).copied().unwrap_or(false),
+            _ => false,
         };
         v != (l & 1 == 1)
     }

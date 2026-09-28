@@ -9,7 +9,7 @@
 use super::aig::{Aig, Cnf, FALSE, L, TRUE};
 use super::blast::{self, Bits};
 use super::sat::{Answer, Solver};
-use super::{Certificate, Config};
+use super::{Certificate, Config, Unknown};
 use crate::BitVec;
 use crate::error::Error;
 use crate::ops::{CmpOpExt, UnOp};
@@ -26,7 +26,7 @@ pub enum RuleOutcome {
     /// differ.
     Refuted(Vec<BitVec>),
     /// Not decided: why.
-    Unknown(String),
+    Unknown(Unknown),
 }
 
 #[derive(Clone)]
@@ -329,10 +329,10 @@ pub fn rule(rule: &Rule, widths: &[u16], cfg: &Config) -> Result<RuleOutcome, Er
     let mut roots = vec![guard];
     roots.extend(&const_bits);
     let mut solver = Solver::new();
-    let mut cnf = Cnf::encode(&s.g, &roots, &mut solver);
+    let mut cnf = Cnf::encode(&s.g, &roots, &mut solver, false);
     cnf.assert(guard, &mut solver);
     for _ in 0..MAX_CASES {
-        let model = match solver.solve(cfg.max_conflicts) {
+        let model = match solver.solve_within(cfg.limits()) {
             Answer::Sat(m) => m,
             Answer::Unsat => return Ok(RuleOutcome::Proved(None)),
             Answer::Unknown => return Ok(first),
@@ -415,11 +415,14 @@ fn attempt(
     };
     let (guard, l, r) = match run(&mut s) {
         Ok(x) => x,
-        Err(Error::Unsupported(why)) => return Ok(RuleOutcome::Unknown(why)),
+        Err(Error::Unsupported(why)) => {
+            return Ok(RuleOutcome::Unknown(Unknown::Unsupported(why)));
+        }
         Err(e) => return Err(e),
     };
     if s.g.len() > cfg.max_nodes {
-        return Ok(RuleOutcome::Unknown("the circuit is too large".into()));
+        let nodes = s.g.len();
+        return Ok(RuleOutcome::Unknown(Unknown::TooLarge { nodes }));
     }
     let g = &mut s.g;
     let mut equal = blast::eq(g, &l, &r);
@@ -444,12 +447,12 @@ fn attempt(
     if cfg.certificate {
         solver.log_proof();
     }
-    let mut cnf = Cnf::encode(g, &[bad], &mut solver);
+    let mut cnf = Cnf::encode(g, &[bad], &mut solver, cfg.certificate);
     cnf.assert(bad, &mut solver);
-    Ok(match solver.solve(cfg.max_conflicts) {
+    Ok(match solver.solve_within(cfg.limits()) {
         Answer::Unsat => RuleOutcome::Proved(cfg.certificate.then(|| Certificate {
             vars: solver.num_vars(),
-            clauses: cnf.clauses.clone(),
+            clauses: core::mem::take(&mut cnf.clauses),
             proof: solver.take_proof().unwrap_or_default(),
         })),
         Answer::Sat(model) => {
@@ -497,9 +500,10 @@ fn attempt(
             }
             RuleOutcome::Refuted(params)
         }
-        Answer::Unknown => {
-            RuleOutcome::Unknown(format!("no answer within {} conflicts", cfg.max_conflicts))
-        }
+        Answer::Unknown => RuleOutcome::Unknown(Unknown::Budget {
+            conflicts: solver.conflicts,
+            propagations: solver.propagations,
+        }),
     })
 }
 

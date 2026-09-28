@@ -47,7 +47,7 @@ pub fn builtin_sources() -> [(&'static str, &'static str, &'static str); 2] {
     ]
 }
 
-#[cfg(any(test, feature = "check"))]
+#[cfg(any(test, feature = "prove"))]
 pub(crate) use compile::width_assignments;
 
 /// Options for [`RuleProgram::compile_with`].

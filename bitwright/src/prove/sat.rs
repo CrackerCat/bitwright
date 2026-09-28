@@ -67,8 +67,29 @@ pub enum Answer {
     Sat(Vec<bool>),
     /// Unsatisfiable (with a proof, when logging was on).
     Unsat,
-    /// The conflict budget ran out.
+    /// A limit was reached: another call goes on from here.
     Unknown,
+}
+
+/// The most work one call of [`Solver::solve_within`] may do, counted from the call's start.
+/// Both counters are deterministic: the same clauses and limits give the same answer.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Conflicts.
+    pub conflicts: u64,
+    /// Propagations (literals propagated), which track the time a call takes more closely than
+    /// conflicts do: each conflict costs more propagation on a larger formula.
+    pub propagations: u64,
+}
+
+impl Limits {
+    /// At most `conflicts` conflicts, and any number of propagations.
+    pub fn conflicts(conflicts: u64) -> Limits {
+        Limits {
+            conflicts,
+            propagations: u64::MAX,
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -78,24 +99,39 @@ enum Value {
     Unset,
 }
 
+/// A clause: its literals are `arena[start..start + len]`, the two watched ones first.
+#[derive(Copy, Clone)]
 struct Clause {
-    lits: Vec<Lit>,
-    learnt: bool,
+    start: u32,
+    len: u32,
     lbd: u32,
     activity: f32,
+    learnt: bool,
     deleted: bool,
 }
 
 #[derive(Copy, Clone)]
 struct Watch {
     clause: u32,
+    /// A literal of the clause: when it is true, the clause is (for a binary clause, the other
+    /// literal, which the watched one's falsity implies).
     blocker: Lit,
 }
 
-/// A CDCL solver. Clauses are added once, then [`solve`](Self::solve) is called.
+/// A CDCL solver. Clauses are added, then [`solve`](Self::solve) is called; a call that ends
+/// on its limits keeps the search where it stopped, so the next call goes on from there, and
+/// calls of `a` then `b` conflicts do exactly what one call of `a + b` would. Adding a clause
+/// after a call starts the search again from the top level, keeping what was learned.
 pub struct Solver {
     clauses: Vec<Clause>,
+    /// Every clause's literals, one after another.
+    arena: Vec<Lit>,
+    /// Literals of deleted clauses still in the arena.
+    wasted: usize,
+    /// Clauses of three or more literals, under the negation of each watched literal.
     watches: Vec<Vec<Watch>>,
+    /// Binary clauses, likewise (the other literal as the blocker).
+    bins: Vec<Vec<Watch>>,
     values: Vec<Value>,
     level: Vec<u32>,
     reason: Vec<Option<u32>>,
@@ -111,6 +147,14 @@ pub struct Solver {
     /// The formula is already contradictory (an empty clause, or a top-level conflict).
     unsat: bool,
     proof: Option<Vec<Step>>,
+    /// Restarts so far (the index into the Luby sequence).
+    restarts: u32,
+    /// Conflicts since the last restart.
+    here: u64,
+    /// When to reduce the learned clauses next (in conflicts).
+    next_reduce: u64,
+    /// Learned clauses not deleted.
+    learnts: usize,
     /// Conflicts so far.
     pub conflicts: u64,
     /// Decisions so far.
@@ -141,7 +185,10 @@ impl Solver {
     pub fn new() -> Solver {
         Solver {
             clauses: Vec::new(),
+            arena: Vec::new(),
+            wasted: 0,
             watches: Vec::new(),
+            bins: Vec::new(),
             values: Vec::new(),
             level: Vec::new(),
             reason: Vec::new(),
@@ -156,6 +203,10 @@ impl Solver {
             seen: Vec::new(),
             unsat: false,
             proof: None,
+            restarts: 0,
+            here: 0,
+            next_reduce: 2000,
+            learnts: 0,
             conflicts: 0,
             decisions: 0,
             propagations: 0,
@@ -177,6 +228,17 @@ impl Solver {
         self.values.len() as u32
     }
 
+    /// The number of clauses kept, learned ones included (units are assignments, not
+    /// clauses).
+    pub fn num_clauses(&self) -> usize {
+        self.clauses.iter().filter(|c| !c.deleted).count()
+    }
+
+    /// The number of learned clauses kept.
+    pub fn num_learnts(&self) -> usize {
+        self.learnts
+    }
+
     /// A new variable.
     pub fn new_var(&mut self) -> Var {
         let v = self.values.len() as u32;
@@ -188,6 +250,8 @@ impl Solver {
         self.seen.push(0);
         self.watches.push(Vec::new());
         self.watches.push(Vec::new());
+        self.bins.push(Vec::new());
+        self.bins.push(Vec::new());
         self.heap.insert(v, &self.activity);
         v
     }
@@ -205,12 +269,18 @@ impl Solver {
         }
     }
 
-    /// Adds a clause (at decision level 0, before solving). Returns `false` when the formula is
-    /// now known unsatisfiable.
+    fn lits(&self, c: u32) -> &[Lit] {
+        let c = self.clauses[c as usize];
+        &self.arena[c.start as usize..(c.start + c.len) as usize]
+    }
+
+    /// Adds a clause (the search goes back to the top level first). Returns `false` when the
+    /// formula is now known unsatisfiable.
     pub fn add_clause(&mut self, lits: &[Lit]) -> bool {
         if self.unsat {
             return false;
         }
+        self.cancel_until(0);
         let mut c: Vec<Lit> = lits.to_vec();
         c.sort_unstable();
         c.dedup();
@@ -255,29 +325,37 @@ impl Solver {
                 true
             }
             _ => {
-                self.attach(reduced, false, 0);
+                self.attach(&reduced, false, 0);
                 true
             }
         }
     }
 
-    fn attach(&mut self, lits: Vec<Lit>, learnt: bool, lbd: u32) -> u32 {
+    fn attach(&mut self, lits: &[Lit], learnt: bool, lbd: u32) -> u32 {
         let idx = self.clauses.len() as u32;
-        self.watches[(!lits[0]).0 as usize].push(Watch {
+        let list = if lits.len() == 2 {
+            &mut self.bins
+        } else {
+            &mut self.watches
+        };
+        list[(!lits[0]).0 as usize].push(Watch {
             clause: idx,
             blocker: lits[1],
         });
-        self.watches[(!lits[1]).0 as usize].push(Watch {
+        list[(!lits[1]).0 as usize].push(Watch {
             clause: idx,
             blocker: lits[0],
         });
         self.clauses.push(Clause {
-            lits,
-            learnt,
+            start: self.arena.len() as u32,
+            len: lits.len() as u32,
             lbd,
             activity: 0.0,
+            learnt,
             deleted: false,
         });
+        self.arena.extend_from_slice(lits);
+        self.learnts += usize::from(learnt);
         idx
     }
 
@@ -303,8 +381,21 @@ impl Solver {
             let p = self.trail[self.qhead];
             self.qhead += 1;
             self.propagations += 1;
-            // Clauses watching ¬p (watched under the literal that became false).
-            let mut ws = core::mem::take(&mut self.watches[p.0 as usize]);
+            // Binary clauses with ¬p: the other literal holds.
+            let pi = p.0 as usize;
+            for k in 0..self.bins[pi].len() {
+                let w = self.bins[pi][k];
+                match self.value(w.blocker) {
+                    Value::True => {}
+                    Value::Unset => self.assign(w.blocker, Some(w.clause)),
+                    Value::False => {
+                        self.qhead = self.trail.len();
+                        return Some(w.clause);
+                    }
+                }
+            }
+            // Longer clauses watching ¬p (watched under the literal that became false).
+            let mut ws = core::mem::take(&mut self.watches[pi]);
             let false_lit = !p;
             let mut i = 0;
             let mut j = 0;
@@ -317,37 +408,32 @@ impl Solver {
                     j += 1;
                     continue;
                 }
-                let ci = w.clause as usize;
-                if self.clauses[ci].deleted {
+                let c = self.clauses[w.clause as usize];
+                if c.deleted {
                     continue;
                 }
-                // Make lits[1] the false literal.
-                {
-                    let c = &mut self.clauses[ci].lits;
-                    if c[0] == false_lit {
-                        c.swap(0, 1);
-                    }
+                let (s, e) = (c.start as usize, (c.start + c.len) as usize);
+                // Make the second literal the false one.
+                if self.arena[s] == false_lit {
+                    self.arena.swap(s, s + 1);
                 }
-                let first = self.clauses[ci].lits[0];
+                let first = self.arena[s];
+                let kept = Watch {
+                    clause: w.clause,
+                    blocker: first,
+                };
                 if first != w.blocker && self.value(first) == Value::True {
-                    ws[j] = Watch {
-                        clause: w.clause,
-                        blocker: first,
-                    };
+                    ws[j] = kept;
                     j += 1;
                     continue;
                 }
                 // Look for a new literal to watch.
-                let len = self.clauses[ci].lits.len();
                 let mut found = false;
-                for k in 2..len {
-                    let l = self.clauses[ci].lits[k];
+                for k in s + 2..e {
+                    let l = self.arena[k];
                     if self.value(l) != Value::False {
-                        self.clauses[ci].lits.swap(1, k);
-                        self.watches[(!l).0 as usize].push(Watch {
-                            clause: w.clause,
-                            blocker: first,
-                        });
+                        self.arena.swap(s + 1, k);
+                        self.watches[(!l).0 as usize].push(kept);
                         found = true;
                         break;
                     }
@@ -355,10 +441,7 @@ impl Solver {
                 if found {
                     continue;
                 }
-                ws[j] = Watch {
-                    clause: w.clause,
-                    blocker: first,
-                };
+                ws[j] = kept;
                 j += 1;
                 if self.value(first) == Value::False {
                     conflict = Some(w.clause);
@@ -373,7 +456,7 @@ impl Solver {
                 }
             }
             ws.truncate(j);
-            self.watches[p.0 as usize] = ws;
+            self.watches[pi] = ws;
             if conflict.is_some() {
                 return conflict;
             }
@@ -404,6 +487,20 @@ impl Solver {
         }
     }
 
+    /// Makes `l` the first literal of clause `c` (a reason clause, whose implied literal is
+    /// `l`).
+    fn implied_first(&mut self, c: u32, l: Lit) {
+        let cl = self.clauses[c as usize];
+        let s = cl.start as usize;
+        if self.arena[s] != l {
+            let k = self.arena[s..s + cl.len as usize]
+                .iter()
+                .position(|&x| x == l)
+                .unwrap_or(0);
+            self.arena.swap(s, s + k);
+        }
+    }
+
     /// First-UIP conflict analysis: the learned clause (asserting literal first), the level to
     /// go back to, and its literal block distance.
     fn analyze(&mut self, confl: u32) -> (Vec<Lit>, u32, u32) {
@@ -414,11 +511,14 @@ impl Solver {
         let mut confl = Some(confl);
         loop {
             let c = confl.expect("a reason for every implied literal");
-            if self.clauses[c as usize].learnt {
+            let cl = self.clauses[c as usize];
+            if cl.learnt {
                 self.bump_clause(c);
             }
-            let lits = self.clauses[c as usize].lits.clone();
-            for &q in lits.iter().skip(usize::from(p.is_some())) {
+            // A reason's first literal is the implied one (`p`), skipped.
+            let s = cl.start as usize + usize::from(p.is_some());
+            for k in s..(cl.start + cl.len) as usize {
+                let q = self.arena[k];
                 let v = q.var() as usize;
                 if self.seen[v] == 0 && self.level[v] > 0 {
                     self.bump_var(q.var());
@@ -445,13 +545,8 @@ impl Solver {
             if path == 0 {
                 break;
             }
-            // The reason's first literal is the implied one (`l`), skipped above.
             if let Some(c) = confl {
-                let lits = &mut self.clauses[c as usize].lits;
-                if lits[0] != l {
-                    let k = lits.iter().position(|&x| x == l).unwrap_or(0);
-                    lits.swap(0, k);
-                }
+                self.implied_first(c, l);
             }
         }
         learnt[0] = !p.expect("a UIP");
@@ -501,8 +596,9 @@ impl Solver {
             let Some(c) = self.reason[p.var() as usize] else {
                 return false;
             };
-            let lits = self.clauses[c as usize].lits.clone();
-            for &q in &lits {
+            let cl = self.clauses[c as usize];
+            for k in cl.start as usize..(cl.start + cl.len) as usize {
+                let q = self.arena[k];
                 let v = q.var() as usize;
                 if q.var() == p.var() || self.seen[v] != 0 || self.level[v] == 0 {
                     continue;
@@ -542,6 +638,32 @@ impl Solver {
         self.qhead = lim;
     }
 
+    /// The decision levels a restart can keep (van der Tak, Ramos and Heule, "Reusing the
+    /// Assignment Trail in CDCL Solvers", 2011): those whose decisions are all more active than
+    /// the next decision would be. Going back to level 0, the search would take those same
+    /// decisions again, with the same phases, and propagate the same literals, which on a large
+    /// circuit is most of a restart's cost.
+    fn reusable_levels(&mut self) -> u32 {
+        // The next decision: the most active unassigned variable (assigned ones leave the
+        // heap, and come back when unassigned).
+        let next = loop {
+            match self.heap.top() {
+                None => return 0,
+                Some(v) if self.values[v as usize] == Value::Unset => break v,
+                Some(_) => {
+                    self.heap.pop(&self.activity);
+                }
+            }
+        };
+        let act = self.activity[next as usize];
+        (0..self.decision_level())
+            .find(|&l| {
+                let d = self.trail[self.trail_lim[l as usize]].var();
+                self.activity[d as usize] < act
+            })
+            .unwrap_or_else(|| self.decision_level())
+    }
+
     fn pick(&mut self) -> Option<Lit> {
         while let Some(v) = self.heap.pop(&self.activity) {
             if self.values[v as usize] == Value::Unset {
@@ -556,7 +678,7 @@ impl Solver {
         let mut idx: Vec<u32> = (0..self.clauses.len() as u32)
             .filter(|&i| {
                 let c = &self.clauses[i as usize];
-                c.learnt && !c.deleted && c.lbd > 2 && c.lits.len() > 2
+                c.learnt && !c.deleted && c.lbd > 2 && c.len > 2
             })
             .collect();
         idx.sort_by(|&a, &b| {
@@ -568,7 +690,7 @@ impl Solver {
             )
         });
         let locked = |s: &Solver, c: u32| {
-            let l = s.clauses[c as usize].lits[0];
+            let l = s.arena[s.clauses[c as usize].start as usize];
             s.value(l) == Value::True && s.reason[l.var() as usize] == Some(c)
         };
         for &c in idx.iter().take(idx.len() / 2) {
@@ -576,79 +698,116 @@ impl Solver {
                 continue;
             }
             self.clauses[c as usize].deleted = true;
-            if let Some(p) = &mut self.proof {
-                p.push(Step::Delete(self.clauses[c as usize].lits.clone()));
+            self.learnts -= 1;
+            self.wasted += self.clauses[c as usize].len as usize;
+            if self.proof.is_some() {
+                let lits = self.lits(c).to_vec();
+                if let Some(p) = &mut self.proof {
+                    p.push(Step::Delete(lits));
+                }
             }
+        }
+        if self.wasted * 4 > self.arena.len() {
+            self.collect();
         }
     }
 
-    /// Solves within `max_conflicts` conflicts.
+    /// Drops the deleted clauses: the arena is compacted, the clauses renumbered, and every
+    /// watch and reason follows.
+    fn collect(&mut self) {
+        let mut map = vec![u32::MAX; self.clauses.len()];
+        let mut arena = Vec::with_capacity(self.arena.len() - self.wasted);
+        let mut kept = 0usize;
+        for (i, m) in map.iter_mut().enumerate() {
+            let c = self.clauses[i];
+            if c.deleted {
+                continue;
+            }
+            *m = kept as u32;
+            let start = arena.len() as u32;
+            arena.extend_from_slice(&self.arena[c.start as usize..(c.start + c.len) as usize]);
+            self.clauses[kept] = Clause { start, ..c };
+            kept += 1;
+        }
+        self.clauses.truncate(kept);
+        self.arena = arena;
+        self.wasted = 0;
+        for ws in self.watches.iter_mut().chain(self.bins.iter_mut()) {
+            ws.retain_mut(|w| {
+                w.clause = map[w.clause as usize];
+                w.clause != u32::MAX
+            });
+        }
+        for r in self.reason.iter_mut().flatten() {
+            *r = map[*r as usize];
+        }
+    }
+
+    /// Solves within `max_conflicts` conflicts (see [`solve_within`](Self::solve_within)).
     pub fn solve(&mut self, max_conflicts: u64) -> Answer {
+        self.solve_within(Limits::conflicts(max_conflicts))
+    }
+
+    /// Solves within `limits`, counted from this call. On [`Answer::Unknown`] the search stays
+    /// where it stopped: the next call goes on from there.
+    pub fn solve_within(&mut self, limits: Limits) -> Answer {
         if self.unsat {
             return Answer::Unsat;
         }
-        if self.propagate().is_some() {
-            self.unsat = true;
-            if let Some(p) = &mut self.proof {
-                p.push(Step::Add(Vec::new()));
-            }
-            return Answer::Unsat;
-        }
-        let start = self.conflicts;
-        let mut restart = 0u32;
-        let mut next_reduce = 2000u64;
+        let (c0, p0) = (self.conflicts, self.propagations);
         loop {
-            let budget = luby(restart) * 100;
-            restart += 1;
-            let mut here = 0u64;
-            loop {
-                if let Some(confl) = self.propagate() {
-                    self.conflicts += 1;
-                    here += 1;
-                    if self.decision_level() == 0 {
-                        self.unsat = true;
-                        if let Some(p) = &mut self.proof {
-                            p.push(Step::Add(Vec::new()));
-                        }
-                        return Answer::Unsat;
-                    }
-                    let (learnt, bt, lbd) = self.analyze(confl);
-                    self.cancel_until(bt);
+            if let Some(confl) = self.propagate() {
+                self.conflicts += 1;
+                self.here += 1;
+                if self.decision_level() == 0 {
+                    self.unsat = true;
                     if let Some(p) = &mut self.proof {
-                        p.push(Step::Add(learnt.clone()));
+                        p.push(Step::Add(Vec::new()));
                     }
-                    if learnt.len() == 1 {
-                        self.assign(learnt[0], None);
-                    } else {
-                        let first = learnt[0];
-                        let c = self.attach(learnt, true, lbd);
-                        self.bump_clause(c);
-                        self.assign(first, Some(c));
-                    }
-                    self.var_inc /= 0.95;
-                    self.cla_inc /= 0.999;
-                    if self.conflicts - start >= max_conflicts {
-                        self.cancel_until(0);
-                        return Answer::Unknown;
-                    }
-                    if self.conflicts >= next_reduce {
-                        next_reduce = self.conflicts + 2000 + 300 * (self.conflicts / 2000);
-                        self.reduce();
-                    }
-                } else {
-                    if here >= budget {
-                        self.cancel_until(0);
-                        break;
-                    }
-                    let Some(d) = self.pick() else {
-                        let model = self.values.iter().map(|&v| v == Value::True).collect();
-                        self.cancel_until(0);
-                        return Answer::Sat(model);
-                    };
-                    self.decisions += 1;
-                    self.trail_lim.push(self.trail.len());
-                    self.assign(d, None);
+                    return Answer::Unsat;
                 }
+                let (learnt, bt, lbd) = self.analyze(confl);
+                self.cancel_until(bt);
+                if let Some(p) = &mut self.proof {
+                    p.push(Step::Add(learnt.clone()));
+                }
+                if learnt.len() == 1 {
+                    self.assign(learnt[0], None);
+                } else {
+                    let c = self.attach(&learnt, true, lbd);
+                    self.bump_clause(c);
+                    self.assign(learnt[0], Some(c));
+                }
+                self.var_inc /= 0.95;
+                self.cla_inc /= 0.999;
+                if self.conflicts >= self.next_reduce {
+                    self.next_reduce = self.conflicts + 2000 + 300 * (self.conflicts / 2000);
+                    self.reduce();
+                }
+                if self.conflicts - c0 >= limits.conflicts
+                    || self.propagations - p0 >= limits.propagations
+                {
+                    return Answer::Unknown;
+                }
+            } else {
+                if self.propagations - p0 >= limits.propagations {
+                    return Answer::Unknown;
+                }
+                if self.here >= luby(self.restarts) * 100 {
+                    self.restarts += 1;
+                    self.here = 0;
+                    let keep = self.reusable_levels();
+                    self.cancel_until(keep);
+                    continue;
+                }
+                let Some(d) = self.pick() else {
+                    let model = self.values.iter().map(|&v| v == Value::True).collect();
+                    self.cancel_until(0);
+                    return Answer::Sat(model);
+                };
+                self.decisions += 1;
+                self.trail_lim.push(self.trail.len());
+                self.assign(d, None);
             }
         }
     }
@@ -702,6 +861,10 @@ impl Heap {
         {
             self.up(i as usize, act);
         }
+    }
+
+    fn top(&self) -> Option<Var> {
+        self.heap.first().copied()
     }
 
     fn pop(&mut self, act: &[f64]) -> Option<Var> {
