@@ -541,6 +541,10 @@ fn application_is_sound(p: &RuleProgram) {
         vars: Vec::new(),
     };
     for rule in p.rules() {
+        // A stream per rule, so adding or changing a rule changes no other rule's instances.
+        g.rng = Rng(rule.name.bytes().fold(0xa991_7e5d, |h: u64, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        }));
         let mut fired = 0u32;
         let assignments: Vec<Vec<u16>> = crate::rules::width_assignments(rule)
             .into_iter()
