@@ -51,6 +51,11 @@ width. A literal that does not fit at some admitted width is a compile error, ne
   negated: the facts can only prove, never refute.
 - *constant predicates* on `const` parameters: `is_pow2`, `is_lowmask`, `is_shifted_mask`.
 - *pure conditions*: comparisons and arithmetic over `const` parameters, literals and `let`s.
+- `one_use(e)`, for a parameter or a subterm written as in the pattern: the node it matched has
+  no other user, so the rewrite frees it rather than adding nodes beside it
+  (`(x << k) & m => (x & c) << k if one_use(x << k)`). It is about sharing, not values, so
+  checking and proving take it as true; the engine answers it from the DAG's use counts, and
+  takes it as true when sharing is ignored.
 
 **Lets** compute constants from constant parameters when the rule matches:
 

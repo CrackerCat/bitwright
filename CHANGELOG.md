@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- **A constant and a left shift have one form.** `(x << k) & m` (and `(x + x) & m`, as the
+  linear pass writes `2·x`) becomes `(x & (m >>u k)) << k`, and `|` and `^` likewise when `m`
+  sets no bit the shift clears (`core.shift_canonical`). So `(x & K) << 1 == (x << 1) & 2K`
+  is decided, and the rules written with the constant below the shift (`add_xor_and`,
+  `xor_from_sum_double_and`, …) fire on either spelling. A mask the shift makes dead goes
+  (`(x & 0x7fffffff) << 1` is `x + x`). The termination order ranks `Shl` below `&`, `|` and
+  `^` on ties to allow it; no other rule changes direction. The two
+  `guarded_recovery_mba_normalized` rules now match the new form.
+- **`one_use(e)` in rule guards**, for a parameter or a subterm written as in the pattern: the
+  node it matched has no other user, so the rewrite frees it rather than adding nodes beside it
+  (LLVM's `m_OneUse`). It is about sharing, not values: checking, proving and the SMT-LIB and
+  Lean exports take it as true, and so does the engine under `Sharing::Ignored`. Otherwise the
+  engine answers it from the use counts of the live DAG, which rule phases now keep as the
+  passes do (counted on first need), and a "no" from it leaves the node not final. The shift
+  canonicalization uses it: with it, the random-DAG corpora come out the size they did before
+  that canonicalization (9,043 and 9,422 nodes against 9,043 and 9,421), where without it they
+  grew by 6 and 7.
+- **`check::preempted`: rules the engine never lets fire.** For each rule it simplifies
+  instances of the pattern and the rule's result at them, and reports the instances where a
+  rule or pass rewrites a part of the pattern first and the result is larger than the rule's,
+  so a pattern written in a spelling the engine does not keep is found when it is written.
+  It also reports rules that never fire because another rule or a pass always gets to their
+  instances first, with the same result (`PreemptionKind::Shadowed`): dead rules, such as a
+  rule a later one duplicates. `bitwright check` warns of both, and the built-in corpus is
+  tested to have none.
+- **Rules for the spellings the engine keeps**, for the 14 built-in rules `check::preempted`
+  found preempted: complementary selects and min/max of 1 or all ones as `zext`/`sext` of the
+  condition, in either operand order; disjoint adds as ors (`split_mask_or_or`, `recombine_extracted_field_or`, `or_constant_to_concat`,
+  `shifted_or_constant`); `shifted_add_constant` for a mask `and_mask_redundant` removes; and
+  `sdiv_pow2_identity` for the shift `mul_pow2` makes of the product.
 - **Prover questions decided in steps, with the reason and the work reported** (issue #11).
   - **`prove::Question`** is a question simplified, blasted and encoded once, then solved
     under as many budgets as its caller likes (`Question::solve(cx, Limits)`). A search that

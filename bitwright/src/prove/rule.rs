@@ -169,6 +169,10 @@ impl Sym<'_> {
                 SVal::Bool(a.truthy(&mut self.g) ^ 1)
             }
             RNode::Fact(p, x, m) => {
+                // About sharing, not values.
+                if *p == FactPred::OneUse {
+                    return Ok(SVal::Bool(TRUE));
+                }
                 if *p == FactPred::Proves {
                     let v = self.eval(*x)?;
                     return Ok(SVal::Bool(v.truthy(&mut self.g)));

@@ -445,7 +445,7 @@ fn fold(r: &mut Runner<'_, '_>, cx: &mut Context, n: u32) -> Result<Step, Stop> 
 /// The roots other than the active one do not change while it is processed: their part is
 /// counted once per root ([`Live`]) and stands in every phase run in which none of the nodes
 /// they reach was retired (a count from scratch skips retired nodes, and what only they reach).
-fn refresh_uses(r: &mut Runner<'_, '_>, cx: &Context) -> Result<(), Stop> {
+pub(super) fn refresh_uses(r: &mut Runner<'_, '_>, cx: &Context) -> Result<(), Stop> {
     if !r.uses_on {
         r.live.clear();
         r.scratch.seen.begin(cx.len());
@@ -844,7 +844,7 @@ pub(super) fn region_cap(r: &Runner<'_, '_>) -> u32 {
 }
 
 /// Whether the commit rule ignores sharing ([`Sharing::Ignored`]).
-fn alone(r: &Runner<'_, '_>) -> bool {
+pub(super) fn alone(r: &Runner<'_, '_>) -> bool {
     r.inner.strategy.sharing == Sharing::Ignored
 }
 

@@ -817,6 +817,73 @@ fn match_step_budgets_end_runs() {
     assert_eq!(cx.display(out.expr).to_string(), "x + y");
 }
 
+/// A constant mask, or or xor spelled below a shift or above it reaches one form, so equal
+/// spellings compare equal and the rules written for one fire on the other.
+/// The shift canonicalization moves a mask below a shift only when the shift has no other
+/// user (`one_use`): with another user the shift stays, and the move would add a node.
+#[test]
+fn shared_shifts_keep_their_mask() {
+    let engine = Engine::standard();
+    let o = ParseOptions::width(Width::W32);
+    for (input, want) in [
+        ("(x << 3) & 0x7f8", "(x & 255) << 3"),
+        ("((x + x) & 0x1fe) * (x + x)", "(x + x) * ((x + x) & 510)"),
+        (
+            "((x << 3) & 0x7f8) * (x << 3)",
+            "(x << 3) * ((x << 3) & 0x7f8)",
+        ),
+    ] {
+        let mut cx = Context::new();
+        let e = cx.parse(input, &o).unwrap();
+        let got = engine.simplify(&mut cx, e).unwrap().expr;
+        let want = cx.parse(want, &o).unwrap();
+        assert_eq!(got, want, "{input} gave {}", cx.display(got));
+    }
+    // Ignoring sharing, `one_use` always holds.
+    let alone = Engine::builder()
+        .builtin()
+        .strategy(Strategy::standard().with_sharing(Sharing::Ignored))
+        .build()
+        .unwrap();
+    let mut cx = Context::new();
+    let e = cx.parse("((x << 3) & 0x7f8) * (x << 3)", &o).unwrap();
+    let got = alone.simplify(&mut cx, e).unwrap().expr;
+    assert!(
+        cx.display(got).to_string().contains("x & 255"),
+        "{}",
+        cx.display(got)
+    );
+}
+
+#[test]
+fn masks_across_shifts_have_one_form() {
+    let engine = Engine::standard();
+    let o = ParseOptions::width(Width::W32);
+    for (input, want) in [
+        ("(x & 0xff) << 1 == (x << 1) & 0x1fe", "1:1"),
+        ("(x & 0xf0) << 4 == (x << 4) & 0xf00", "1:1"),
+        ("(x & 0xff) + (x & 0xff) == (x + x) & 0x1fe", "1:1"),
+        ("(x ^ 0xff) + ((x & 0xff) << 1)", "x + 255"),
+        ("(x ^ 0xff) + ((x << 1) & 0x1fe)", "x + 255"),
+        ("(x + 0xff) - ((x & 0xff) << 1)", "x ^ 255"),
+        ("(x + 0xff) - ((x << 1) & 0x1fe)", "x ^ 255"),
+        ("(x & 0x7fffffff) << 2", "x << 2"),
+        ("(x << 1) & 0xfffffffe", "x + x"),
+        ("(x & 0x7fffffff) << 1", "x + x"),
+        ("((x << 1) & 0x1fe) >>u 1", "x & 255"),
+        ("(x | 3) << 2 == (x << 2) | 12", "1:1"),
+        ("(x ^ 3) << 2 == (x << 2) ^ 12", "1:1"),
+        ("((x << 1) | 2) - (x + 1)", "x ^ 1"),
+        ("((x | 1) << 1) - (x + 1)", "x ^ 1"),
+    ] {
+        let mut cx = Context::new();
+        let e = cx.parse(input, &o).unwrap();
+        let got = engine.simplify(&mut cx, e).unwrap().expr;
+        let want = cx.parse(want, &o).unwrap();
+        assert_eq!(got, want, "{input} gave {}", cx.display(got));
+    }
+}
+
 #[test]
 fn rewrite_chains_reach_the_normal_form() {
     // One round: a `Local` phase reaches the normal form by itself (later rounds exist for the

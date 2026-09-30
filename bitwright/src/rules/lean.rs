@@ -342,6 +342,8 @@ impl Out<'_> {
             RNode::And(a, b) => format!("({} ∧ {})", self.prop(*a), self.prop(*b)),
             RNode::Or(a, b) => format!("({} ∨ {})", self.prop(*a), self.prop(*b)),
             RNode::Not(a) => format!("¬{}", self.prop(*a)),
+            // About sharing, not values.
+            RNode::Fact(FactPred::OneUse, ..) => "True".into(),
             RNode::Fact(p, x, m) => {
                 let w = self.width(*x);
                 match (p, m) {

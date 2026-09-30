@@ -30,6 +30,9 @@ pub(crate) fn const_params(cx: &Context, rule: &Rule, b: &Bindings) -> Option<Ve
         .collect()
 }
 
+/// Whether a node has one user (see [`FactPred::OneUse`]).
+pub(crate) type OneUse<'a> = &'a mut dyn FnMut(&Context, u32) -> bool;
+
 /// What an application may use, and what it reports back.
 #[derive(Default)]
 pub(crate) struct ApplyEnv<'a> {
@@ -51,6 +54,12 @@ pub(crate) struct ApplyEnv<'a> {
     pub(crate) instantiating: bool,
     /// The constraints the facts read so far relied on.
     pub(crate) rel: Reliance,
+    /// Whether a node has one user, for `one_use`; `None` (outside the engine, or when sharing
+    /// is ignored) takes every `one_use` as true.
+    pub(crate) one_use: Option<OneUse<'a>>,
+    /// Set when a `one_use` was false: the answer depends on sharing, so the node may not be
+    /// normal once that changes.
+    pub(crate) shared: bool,
 }
 
 impl ApplyEnv<'_> {
@@ -175,9 +184,23 @@ fn holds(
         ),
         // Only pure conditions can be negated (checked by the compiler).
         RNode::Not(x) => Some(!holds(env, cx, rule, b, *x, widths, consts, lets)?),
+        RNode::Fact(FactPred::OneUse, x, _) => {
+            let Some(one_use) = env.one_use.as_deref_mut() else {
+                return Some(true);
+            };
+            // The matched node, found again through the canonicalizing builder; a node it
+            // had to create was not matched (and is no use).
+            let before = cx.len();
+            let node = build(cx, rule, *x, widths, b, lets)?;
+            let one = cx.len() == before && one_use(cx, node);
+            env.shared |= !one;
+            Some(one)
+        }
         RNode::Fact(p, x, m) => {
             let fx = operand_facts(env, cx, rule, b, *x, widths, consts, lets)?;
             Some(match p {
+                // Answered above.
+                FactPred::OneUse => true,
                 FactPred::NonZero => {
                     let z = Facts::constant(&BitVec::zero(fx.width()));
                     crate::facts::decide_cmp(CmpOp::Eq, &fx, &z) == Some(false)

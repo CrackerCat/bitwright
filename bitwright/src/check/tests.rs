@@ -122,6 +122,21 @@ fn counterexamples_are_small_and_readable() {
     );
 }
 
+/// `one_use` is about sharing, not values: the checker takes it as true, so a rule is as sound
+/// with it as without; it names a parameter or a subterm of the pattern.
+#[test]
+fn one_use_is_true_for_the_checker() {
+    let c = check_one(
+        "rule hoist<W>(x: W, k: const W, m: const W) {
+             (x << k) & m => (x & c) << k if one_use(x << k) let c: W = m >>u k
+         }",
+    );
+    assert!(c.is_sound(), "{:?}", c.verdict);
+    assert!(c.evidence.guard_true_cases() > 0);
+    let p = program("rule by_param<W>(x: W, y: W) { (x + y) & y => x if one_use(y) }");
+    assert_eq!(p.rules().len(), 1);
+}
+
 #[test]
 fn malformed_rules_are_rejected() {
     let cases: &[(&str, &str)] = &[
@@ -180,6 +195,15 @@ fn malformed_rules_are_rejected() {
             "BW0103",
         ),
         ("rule mystery<W>(x: W) { x => nope }", "BW0103"),
+        // `one_use` names a node of the pattern, and cannot be negated.
+        (
+            "rule not_there<W>(x: W, c: const W) { (x << 1) & c => x if one_use(x << 2) }",
+            "BW0104",
+        ),
+        (
+            "rule neg_use<W>(x: W, c: const W) { (x << 1) & c => x if !one_use(x << 1) }",
+            "BW0106",
+        ),
         ("rule lowercase<w>(x: w) { x => x }", "BW0102"),
     ];
     for (body, code) in cases {
@@ -357,6 +381,82 @@ fn corpus_examples_fire() {
     }
 }
 
+/// Every pattern is written in the form the standard engine keeps: no rule or pass rewrites a
+/// part of an instance first and loses what the rule gives there.
+#[test]
+fn corpus_rules_are_not_preempted() {
+    let found = preempted(&crate::engine::Engine::standard(), &core());
+    let found: Vec<String> = found.iter().map(ToString::to_string).collect();
+    assert!(
+        found.is_empty(),
+        "patterns the engine rewrites before they match; write them in the form it keeps:
+{}",
+        found.join(
+            "
+"
+        )
+    );
+}
+
+/// A rule written against `(x << 1) & m` is preempted by the canonical `(x & (m >>u 1)) << 1`;
+/// the same rule written in that form is not. (The engine runs only the canonicalization, so
+/// that nothing else joins the two.)
+#[test]
+fn preempted_finds_patterns_in_a_spelling_the_engine_drops() {
+    use crate::engine::{Engine, Phase, Strategy};
+    let with = |p: &RuleProgram| {
+        Engine::builder()
+            .builtin()
+            .unproven_program(p.clone())
+            .allow_unproven(true)
+            .strategy(Strategy::new(
+                "t",
+                vec![Phase::Local {
+                    groups: vec!["core.shift_canonical".into(), "t".into()],
+                }],
+            ))
+            .build()
+            .unwrap()
+    };
+    let masked_shift = program(
+        "rule sum<W>(x: W, c: const W, m: const W) {
+             (x ^ c) + ((x << 1) & m) => x + c if m == c << 1
+         }",
+    );
+    let found = preempted_rule(&with(&masked_shift), &masked_shift.rules()[0]).expect("preempted");
+    let (by, ..) = found.first.clone().unwrap();
+    assert_eq!(by, "core.shift_canonical::and_shl_const", "{found}");
+    let shifted_and = program("rule sum<W>(x: W, y: W) { (x ^ y) + ((x & y) << 1) => x + y }");
+    assert_eq!(
+        preempted_rule(&with(&shifted_and), &shifted_and.rules()[0]),
+        None
+    );
+}
+
+/// A rule another rule always gets to first, with the same result, is shadowed; one that
+/// fires on some instances is not.
+#[test]
+fn preempted_finds_rules_that_never_fire() {
+    use crate::engine::{Engine, Strategy};
+    let p = program(
+        "rule dup<W>(x: W) { x & ~x => 0 }
+         rule split_c<W>(x: W, c: const W, m: const W, n: const W) {
+             (x & m) + ((x & n) | c) => (x & k) + c if (m & n) == 0 && (c & n) == 0 let k: W = m | n
+         }",
+    );
+    let engine = Engine::builder()
+        .builtin()
+        .unproven_program(p.clone())
+        .allow_unproven(true)
+        .strategy(Strategy::standard().with_rule_groups(&["t"]))
+        .build()
+        .unwrap();
+    let found = preempted_rule(&engine, &p.rules()[0]).expect("shadowed");
+    assert_eq!(found.kind, PreemptionKind::Shadowed, "{found}");
+    assert_eq!(found.first.unwrap().0, "core.bitwise::and_not_self");
+    assert_eq!(preempted_rule(&engine, &p.rules()[1]), None);
+}
+
 #[test]
 fn corpus_ledger_is_fresh() {
     let p = core();
@@ -441,13 +541,22 @@ fn application_is_sound(p: &RuleProgram) {
         vars: Vec::new(),
     };
     for rule in p.rules() {
+        // A stream per rule, so adding or changing a rule changes no other rule's instances.
+        g.rng = Rng(rule.name.bytes().fold(0xa991_7e5d, |h: u64, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        }));
         let mut fired = 0u32;
         let assignments: Vec<Vec<u16>> = crate::rules::width_assignments(rule)
             .into_iter()
             .filter(|ws| ws.iter().all(|&w| w <= 5))
             .filter(|ws| crate::rules::eval::well_formed(rule, rule.lhs, ws, true).is_ok())
             .collect();
-        for round in 0..600 {
+        // 600 instances, and up to ten times as many for a rule that has not fired yet (a
+        // guard on facts random operands rarely prove).
+        for round in 0..6000 {
+            if round >= 600 && fired > 0 {
+                break;
+            }
             let ws = &assignments[round % assignments.len()];
             let mut cx = crate::Context::new();
             let pw: Vec<u16> = rule
