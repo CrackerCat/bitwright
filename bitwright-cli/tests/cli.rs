@@ -306,7 +306,10 @@ fn the_book_catalog_is_fresh() {
     let (code, out, _) = run(&["catalog"]);
     assert_eq!(code, 0);
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../book/src/catalog.md");
-    let page = std::fs::read_to_string(path).unwrap_or_default();
+    // As checked in: a checkout may have turned its line ends into CRLF.
+    let page = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     assert!(
         page == out,
         "book/src/catalog.md is stale; regenerate it with \
