@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
 
 - **A constant and a left shift have one form.** `(x << k) & m` (and `(x + x) & m`, as the
   linear pass writes `2·x`) becomes `(x & (m >>u k)) << k`, and `|` and `^` likewise when `m`
@@ -95,6 +95,16 @@
   `Lowering::raise` now fails on a symbol no host value stands for before emitting anything.
 - **Python:** a host rewrite that uses the context being simplified gets a `BitwrightError`
   instead of waiting for itself.
+- **Behavior changes.** Results change where the shift canonical form or the new rules apply:
+  a constant `&`, `|` or `^` above a left shift is written below it when the shift has no
+  other user, and the built-in rules' patterns for selects of one or all ones, disjoint adds
+  and shifted products now match the forms the engine keeps. The built-in corpus changes, so
+  engines that link it get new ids and contexts start new memos. On the generated corpora of
+  `bitwright-bench --corpus-diff`, MBA results are identical and random DAGs come out at
+  9,043 and 9,422 nodes (9,043 and 9,421 before). `one_use` is a reserved word in the
+  expression syntax, so a symbol of that name must be written in its quoted form. Breaking:
+  `prove::Outcome::Unknown` holds a `prove::Unknown` (see above); the additions to
+  `FactPred` and `Preemption` are to `#[non_exhaustive]` types.
 
 ## 0.12.0
 
