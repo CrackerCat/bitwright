@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::process::ExitCode;
 
-use bitwright::check::{CheckConfig, Verdict, check_program};
+use bitwright::check::{CheckConfig, PreemptionKind, Verdict, check_program, preempted};
 use std::sync::Arc;
 
 use bitwright::engine::{Each, Engine, Run, Strategy};
@@ -21,7 +21,10 @@ commands:
         existing one. `--prove` also proves each rule with the native prover at widths too wide
         to enumerate (8, 32 and 64; binary16, binary32 and binary64 for floating-point rules;
         every assignment of a rule over fixed widths), so a rule with none small enough to
-        enumerate can be proved sound.
+        enumerate can be proved sound. Also warns of each rule the engine preempts: an
+        instance of its pattern where another rule or a pass rewrites a part first, so the
+        rule never fires there (write the pattern in the form the engine keeps), and of each
+        rule that never fires at all because another rule or a pass always gets there first.
   lint <file.bwr>
         compile and print every diagnostic; exit 1 on errors.
   smt <file.bwr> [--rule <group::name>] [--widths <w,...>]
@@ -279,9 +282,57 @@ fn check(rest: &[String]) -> Result<String, Fail> {
             writeln!(out, "  example: {f}").ok();
         }
     }
+    // Rules the engine would take elsewhere first, linked as `simplify --rules` links them (a
+    // file that redefines the built-in groups, the corpus itself, alone).
+    let groups: Vec<&str> = program.groups().iter().map(|g| g.name.as_str()).collect();
+    let engine = Engine::builder()
+        .builtin()
+        .unproven_program(program.clone())
+        .allow_unproven(true)
+        .strategy(Strategy::standard().with_rule_groups(&groups))
+        .build()
+        .or_else(|_| {
+            Engine::builder()
+                .unproven_program(program.clone())
+                .allow_unproven(true)
+                .strategy(Strategy::standard())
+                .build()
+        });
+    let lost = match &engine {
+        Ok(engine) => preempted(engine, &program),
+        Err(_) => Vec::new(),
+    };
+    let shadowed = lost
+        .iter()
+        .filter(|p| p.kind == PreemptionKind::Shadowed)
+        .count();
+    for p in &lost {
+        let label = match p.kind {
+            PreemptionKind::Shadowed => "shadowed ",
+            _ => "preempted",
+        };
+        writeln!(out, "{label}     {p}").ok();
+    }
+    let mut warnings = String::new();
+    if lost.len() > shadowed {
+        write!(
+            warnings,
+            ", {} preempted (warning: write those patterns in the form the engine keeps)",
+            lost.len() - shadowed
+        )
+        .ok();
+    }
+    if shadowed > 0 {
+        write!(
+            warnings,
+            ", {shadowed} shadowed (warning: those rules never fire; remove them or write them \
+             for what the engine misses)"
+        )
+        .ok();
+    }
     writeln!(
         out,
-        "\n{sound} sound, {unsound} unsound, {inconclusive} inconclusive, {bad_examples} failed examples"
+        "\n{sound} sound, {unsound} unsound, {inconclusive} inconclusive, {bad_examples} failed examples{warnings}",
     )
     .ok();
     let ledger = Ledger::from_checks(&checks);

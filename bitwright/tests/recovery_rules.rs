@@ -36,5 +36,5 @@ fn standard_strategy_reaches_recovery_rule_examples() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 64);
+    assert_eq!(checked, 80);
 }

@@ -213,7 +213,8 @@ const EXPLANATIONS: &[(&str, &str)] = &[
         "BW0104",
         "Malformed predicate. Fact predicates take a parameter first (`zero_bits(x, m)`), \
          `disjoint` takes two parameters, `proves` takes one comparison of parameters, `let`s \
-         and literals (`proves(b != c)`), and predicates belong in the guard after `if`.",
+         and literals (`proves(b != c)`), `one_use` takes a parameter or a subterm written as \
+         in the pattern (`one_use(x << k)`), and predicates belong in the guard after `if`.",
     ),
     (
         "BW0105",

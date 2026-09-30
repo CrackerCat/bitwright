@@ -1318,21 +1318,23 @@ impl Runner<'_, '_> {
             self.stats.memo_hits += 1;
             return Ok((r, Fin::relying(rel)));
         }
+        // Use counts are counted afresh in each phase run, on first need (a pass's commit rule,
+        // a rule's `one_use`).
+        self.uses_on = false;
+        self.live.clear();
+        self.dead.clear();
+        self.dead_log.clear();
+        self.phase_start = cx.len() as u32;
+        if let Some(slot) = self.live_roots.get_mut(self.active) {
+            *slot = root;
+        }
         if !matches!(self.inner.phases[phase], PhaseImpl::Local(..)) {
             // A pass's decisions depend on sharing, which the previous phase or round may have
             // changed: start afresh (final results stay memoized).
-            self.uses_on = false;
-            self.live.clear();
-            self.dead.clear();
-            self.dead_log.clear();
             self.partial[phase].clear();
             self.chain_parent.clear();
             self.asks.clear();
             self.first.clear();
-            self.phase_start = cx.len() as u32;
-            if let Some(slot) = self.live_roots.get_mut(self.active) {
-                *slot = root;
-            }
         }
         let mut stack = core::mem::take(&mut self.stack);
         stack.clear();
@@ -1545,14 +1547,41 @@ impl Runner<'_, '_> {
                 .unwrap_or(u32::MAX)
                 .min(MATCH_STEPS);
             let fact_cap = u32::try_from(left.fact_work).unwrap_or(u32::MAX);
+            // `one_use` is answered from the use counts of the live DAG (under
+            // `Sharing::Ignored`, as if each node were used by its user alone: always).
+            let one_use = uses_one_use(rule) && !pass::alone(self);
+            if one_use {
+                pass::refresh_uses(self, cx)?;
+            }
+            let live = core::mem::take(&mut self.live);
+            let roots = core::mem::take(&mut self.live_roots);
+            let mut once = |_: &Context, i: u32| live.uses(i) == Some(1) && !roots.contains(&i);
             let mut env = ApplyEnv {
                 assumptions: self.assumptions,
                 fact_cap: Some(fact_cap),
                 steps,
+                one_use: one_use.then_some(&mut once as crate::rules::apply::OneUse<'_>),
                 ..ApplyEnv::default()
             };
             let (work0, capped0) = (cx.facts.work, cx.facts.capped);
-            let r = self.build(cx, |cx| Ok(try_apply_with(&mut env, cx, rule, n)))?;
+            let r = self.build(cx, |cx| Ok(try_apply_with(&mut env, cx, rule, n)));
+            let shared = env.shared;
+            // What the application reports, without its borrow of the use counts.
+            let env = ApplyEnv {
+                assumptions: self.assumptions,
+                fact_cap: env.fact_cap,
+                out_of_facts: env.out_of_facts,
+                degraded: env.degraded,
+                steps: env.steps,
+                matched: env.matched,
+                instantiating: env.instantiating,
+                rel: env.rel,
+                one_use: None,
+                shared,
+            };
+            self.live = live;
+            self.live_roots = roots;
+            let r = r?;
             self.meter.spent.match_steps += u64::from(steps - env.steps);
             self.meter.spent.fact_work += cx.facts.work - work0;
             // A cap that was the call's budget stops the call; the context's own per-query
@@ -1569,6 +1598,10 @@ impl Runner<'_, '_> {
             let Some(r) = r else {
                 if env.instantiating && cx.len() as u64 >= u64::from(cx.config().max_nodes) {
                     return Err(Stop::Exhausted(Exhausted::ArenaCapacity));
+                }
+                // A "no" from sharing may be a "yes" once the sharing changes.
+                if shared {
+                    fin = fin.and(Fin::PROVISIONAL);
                 }
                 if env.degraded {
                     let why = if fact_capped {
@@ -2248,4 +2281,14 @@ impl Runner<'_, '_> {
         }
         Ok((cur, fin))
     }
+}
+
+/// Whether the rule's guard asks `one_use`.
+fn uses_one_use(rule: &Rule) -> bool {
+    use crate::rules::{FactPred, RNode};
+    rule.guard.is_some()
+        && rule
+            .nodes
+            .iter()
+            .any(|n| matches!(n, RNode::Fact(FactPred::OneUse, ..)))
 }

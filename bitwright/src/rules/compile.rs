@@ -796,6 +796,13 @@ impl Parser<'_> {
                 b.fix(n, SV::Bool, sp)?;
                 Ok(n)
             }
+            "one_use" => {
+                let a = self.args(b, depth, 1)?[0];
+                let sp = span(self);
+                let n = b.node(RNode::Fact(FactPred::OneUse, a, None), sp)?;
+                b.fix(n, SV::Bool, sp)?;
+                Ok(n)
+            }
             "proves" => {
                 let a = self.args(b, depth, 1)?[0];
                 let sp = span(self);
@@ -1586,6 +1593,59 @@ pub(crate) fn children(n: &RNode) -> Vec<NodeId> {
     v
 }
 
+/// The node of the pattern that `n` (a guard's operand) is written as: the same operators,
+/// widths and parameters. `None` if the pattern has none.
+pub(crate) fn pattern_subterm(rule: &Rule, n: NodeId) -> Option<NodeId> {
+    let mut found = None;
+    walk(rule, rule.lhs, |s| {
+        if found.is_none() && same_term(rule, s, n) {
+            found = Some(s);
+        }
+    });
+    found
+}
+
+/// Whether two rule nodes are the same term: equal nodes (their operands aside) of equal
+/// sorts, over operands that are the same terms.
+fn same_term(rule: &Rule, a: NodeId, b: NodeId) -> bool {
+    if a == b {
+        return true;
+    }
+    if rule.sorts[a as usize] != rule.sorts[b as usize] {
+        return false;
+    }
+    let (x, y) = (&rule.nodes[a as usize], &rule.nodes[b as usize]);
+    // The node itself, its operands zeroed.
+    let bare = |n: &RNode| -> RNode {
+        let mut n = n.clone();
+        match &mut n {
+            RNode::Param(_) | RNode::Let(_) | RNode::Lit(_) => {}
+            RNode::Un(_, a)
+            | RNode::Zext(a)
+            | RNode::Sext(a)
+            | RNode::Extract(_, a)
+            | RNode::Not(a)
+            | RNode::ConstP(_, a) => *a = 0,
+            RNode::Bin(_, a, b)
+            | RNode::Cmp(_, a, b)
+            | RNode::Concat(a, b)
+            | RNode::And(a, b)
+            | RNode::Or(a, b) => (*a, *b) = (0, 0),
+            RNode::Select(a, b, c) => (*a, *b, *c) = (0, 0, 0),
+            RNode::Fact(_, a, m) => (*a, *m) = (0, m.map(|_| 0)),
+            RNode::Fp(f) => f.args.iter_mut().for_each(|a| *a = 0),
+        }
+        n
+    };
+    if bare(x) != bare(y) {
+        return false;
+    }
+    let (mut ka, mut kb) = (Vec::new(), Vec::new());
+    push_children(x, &mut ka);
+    push_children(y, &mut kb);
+    ka.len() == kb.len() && ka.iter().zip(&kb).all(|(&p, &q)| same_term(rule, p, q))
+}
+
 /// Pushes the operands of `n` onto `out` (the walkers' stacks), in order.
 pub(crate) fn push_children(n: &RNode, out: &mut Vec<NodeId>) {
     match *n {
@@ -1855,6 +1915,16 @@ fn check_guard(
                             sp(o),
                         ));
                     }
+                }
+                return Ok(());
+            }
+            if p == FactPred::OneUse {
+                if pattern_subterm(rule, x).is_none() {
+                    return Err(Diagnostic::error(
+                        "BW0104",
+                        "`one_use` takes a parameter or a subterm of the pattern, as written there",
+                        sp(x),
+                    ));
                 }
                 return Ok(());
             }

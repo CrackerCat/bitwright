@@ -520,26 +520,56 @@ pub(crate) fn build_pattern(
     widths: &[u16],
     consts: &[crate::BitVec],
 ) -> Option<u32> {
+    let values: Vec<Option<crate::BitVec>> = rule
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            if p.kind == ParamKind::Const {
+                consts.get(i).cloned()
+            } else {
+                None
+            }
+        })
+        .collect();
+    if rule
+        .params
+        .iter()
+        .zip(&values)
+        .any(|(p, v)| p.kind == ParamKind::Const && v.is_none())
+    {
+        return None;
+    }
+    build_instance(cx, rule, widths, &values)
+}
+
+/// Builds an instance of the pattern at the given widths: parameter `i` is the constant
+/// `values[i]`, or a symbol named after it where that is `None`. `None` if some node cannot be
+/// built.
+pub(crate) fn build_instance(
+    cx: &mut Context,
+    rule: &Rule,
+    widths: &[u16],
+    values: &[Option<crate::BitVec>],
+) -> Option<u32> {
     fn build(
         cx: &mut Context,
         rule: &Rule,
         n: NodeId,
         widths: &[u16],
-        consts: &[crate::BitVec],
+        values: &[Option<crate::BitVec>],
     ) -> Option<u32> {
         let w = super::eval::width_of(rule, n, widths);
-        let rec = |cx: &mut Context, m: NodeId| build(cx, rule, m, widths, consts);
+        let rec = |cx: &mut Context, m: NodeId| build(cx, rule, m, widths, values);
         Some(match &rule.nodes[n as usize] {
-            RNode::Param(i) => {
-                let p = &rule.params[*i as usize];
-                if p.kind == ParamKind::Const {
-                    let v = consts.get(*i as usize)?;
-                    cx.mk_const(v).ok()?
-                } else {
+            RNode::Param(i) => match values.get(*i as usize)? {
+                Some(v) => cx.mk_const(v).ok()?,
+                None => {
+                    let p = &rule.params[*i as usize];
                     let e = cx.symbol(format!("${}", p.name).as_str(), w?).ok()?;
                     cx.id(e).ok()?
                 }
-            }
+            },
             RNode::Lit(l) => cx.mk_const(&literal(l, w?, widths)?).ok()?,
             RNode::Un(op, a) => {
                 let a = rec(cx, *a)?;
@@ -584,7 +614,7 @@ pub(crate) fn build_pattern(
             _ => return None,
         })
     }
-    build(cx, rule, rule.lhs, widths, consts)
+    build(cx, rule, rule.lhs, widths, values)
 }
 
 /// Whether the pattern can match anything the builder produces: some instance of it, built

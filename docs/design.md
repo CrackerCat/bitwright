@@ -872,7 +872,13 @@ group core.casts {
     (every bit of `m` is zero in `x`), `one_bits(x, m)`, `nonzero(x)`, `disjoint(x, y)` (no bit can
     be one in both), and `proves(a OP b)` for a comparison of parameters, literals and `let`s;
   - *constant predicates* on `const` parameters: `is_pow2`, `is_lowmask`, `is_shifted_mask`;
-  - *pure conditions*: comparisons and arithmetic over `const` parameters, literals and `let`s.
+  - *pure conditions*: comparisons and arithmetic over `const` parameters, literals and `let`s;
+  - `one_use(e)`, where `e` is a parameter or a subterm written as in the pattern: the node it
+    matched has one user, so the rewrite frees it (LLVM's `m_OneUse`). It is about sharing, not
+    values: the checker, the prover and the exports take it as true, and so does an application
+    outside the engine or under `Sharing::Ignored`. In the engine it is answered from the use
+    counts of the live DAG (those of the passes' commit rule, counted on first need in a phase
+    run), and a "no" from it leaves the node not final, since the sharing may change.
 
   Fact predicates are **monotone**: they may not appear under `!` (BW0106). A fact engine can only
   prove, never refute, so a guard must become no truer when the engine knows less. This is what lets

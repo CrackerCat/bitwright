@@ -81,7 +81,9 @@ fn version_and_abi() {
 
 #[test]
 fn the_header_declares_every_entry_point_and_matches_the_tables() {
-    let header = include_str!("../include/bitwright.h");
+    // As checked in: a checkout may have turned its line ends into CRLF.
+    let header = include_str!("../include/bitwright.h").replace("\r\n", "\n");
+    let header = header.as_str();
     let source = [
         include_str!("lib.rs"),
         include_str!("more.rs"),

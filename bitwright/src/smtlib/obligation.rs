@@ -240,6 +240,8 @@ fn node(out: &mut String, rule: &Rule, n: NodeId, widths: &[u16]) -> Result<Stri
                     .ok_or_else(|| Error::Contract("fact predicate operand".into()))
             };
             match p {
+                // About sharing, not values.
+                FactPred::OneUse => "true".to_string(),
                 FactPred::Proves => truthy(rule, *x, widths)?,
                 FactPred::NonZero => format!("(not (= {} {}))", name(*x), zero(bvw(*x)?)),
                 FactPred::ZeroBits | FactPred::Disjoint => {

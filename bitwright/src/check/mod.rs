@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 
 mod host;
 pub use host::{RewriteCheckConfig, RewriteFailure, RewriteReport, rewrite};
+mod preempt;
+pub use preempt::{Preemption, PreemptionKind, preempted, preempted_rule};
 
 use crate::ops::{BinOp, CmpOp};
 use crate::rules::eval::{Val, admitted, eval, eval_lets, width_of};

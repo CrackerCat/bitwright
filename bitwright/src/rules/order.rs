@@ -16,7 +16,8 @@
 //! The precedence orients the cost-neutral canonicalizations toward the forms the rest of the
 //! library prefers: `Mul > Shl` (multiply by a power of two becomes a shift), `Add > Or`
 //! (a carry-free add becomes an or), `Neg > Not > Sub > Add` (so `~(-x)` becomes `x - 1`),
-//! and casts above arithmetic (`zext(trunc(x))` becomes `x & lowmask`).
+//! `And > Shl` (a mask above a shift moves below it, where the linear pass reads `2^k` times a
+//! bitwise term), and casts above arithmetic (`zext(trunc(x))` becomes `x & lowmask`).
 
 use core::cmp::Ordering;
 
@@ -42,7 +43,8 @@ pub(crate) fn op_rank(op: OpCode) -> u8 {
         OpCode::Sub => 44,
         OpCode::Not => 45,
         OpCode::Neg => 46,
-        OpCode::Shl => 47,
+        // Below the bitwise operators: `(x << k) & m` becomes `(x & (m >>u k)) << k`.
+        OpCode::Shl => 39,
         OpCode::LShr => 48,
         OpCode::AShr => 49,
         OpCode::RotL => 50,

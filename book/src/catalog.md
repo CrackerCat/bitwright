@@ -1175,6 +1175,46 @@ rule merge_complementary_select_add<W>(c: 1, x: W, y: W) {
 
 - `select(p == 0, q, 0) + select(p == 0, 0, r)` → `select(p == 0, q, r)`
 
+#### `merge_complementary_zext_or` — rule
+
+```text
+rule merge_complementary_zext_or<W>(c: 1, y: W) where 1 < W {
+        zext<W>(c) | select(c, 0, y) => select(c, 1, y)
+    }
+```
+
+- `zext<8>(p == 0) | select(p == 0, 0, r)` → `select(p == 0, 1:8, r)`
+
+#### `merge_complementary_zext_add` — rule
+
+```text
+rule merge_complementary_zext_add<W>(c: 1, y: W) where 1 < W {
+        zext<W>(c) + select(c, 0, y) => select(c, 1, y)
+    }
+```
+
+- `zext<8>(p == 0) + select(p == 0, 0, r)` → `select(p == 0, 1:8, r)`
+
+#### `merge_complementary_sext_or` — rule
+
+```text
+rule merge_complementary_sext_or<W>(c: 1, y: W) where 1 < W {
+        sext<W>(c) | select(c, 0, y) => select(c, ones, y)
+    }
+```
+
+- `sext<8>(p == 0) | select(p == 0, 0, r)` → `select(p == 0, 255:8, r)`
+
+#### `merge_complementary_sext_add` — rule
+
+```text
+rule merge_complementary_sext_add<W>(c: 1, y: W) where 1 < W {
+        sext<W>(c) + select(c, 0, y) => select(c, ones, y)
+    }
+```
+
+- `sext<8>(p == 0) + select(p == 0, 0, r)` → `select(p == 0, 255:8, r)`
+
 ### core.recovery_canonical
 
 #### `xor_sign_bit_add` — rule
@@ -1367,6 +1407,54 @@ rule umax_one_add<W>(x: W) where 1 < W { zext<W>(x == 0) + select(1 <=u x, x, 0)
 
 - `zext<8>(p == 0) + select(1 <=u p, p, 0)` → `umax(p, 1)`
 
+#### `smin_one_first_or` — rule
+
+```text
+rule smin_one_first_or<W>(x: W) where 1 < W { zext<W>(1 <=s x) | select(x <s 1, x, 0) => smin(x, 1) }
+```
+
+- `zext<8>(1 <=s p) | select(p <s 1, p, 0)` → `smin(p, 1)`
+
+#### `smin_one_first_add` — rule
+
+```text
+rule smin_one_first_add<W>(x: W) where 1 < W { zext<W>(1 <=s x) + select(x <s 1, x, 0) => smin(x, 1) }
+```
+
+- `zext<8>(1 <=s p) + select(p <s 1, p, 0)` → `smin(p, 1)`
+
+#### `smax_one_first_or` — rule
+
+```text
+rule smax_one_first_or<W>(x: W) where 1 < W { zext<W>(x <=s 1) | select(1 <s x, x, 0) => smax(x, 1) }
+```
+
+- `zext<8>(p <=s 1) | select(1 <s p, p, 0)` → `smax(p, 1)`
+
+#### `smax_one_first_add` — rule
+
+```text
+rule smax_one_first_add<W>(x: W) where 1 < W { zext<W>(x <=s 1) + select(1 <s x, x, 0) => smax(x, 1) }
+```
+
+- `zext<8>(p <=s 1) + select(1 <s p, p, 0)` → `smax(p, 1)`
+
+#### `umax_one_first_or` — rule
+
+```text
+rule umax_one_first_or<W>(x: W) where 1 < W { zext<W>(x <=u 1) | select(1 <u x, x, 0) => select(1 <u x, x, 1) }
+```
+
+- `zext<8>(p <=u 1) | select(1 <u p, p, 0)` → `select(1 <u p, p, 1)`
+
+#### `umax_one_first_add` — rule
+
+```text
+rule umax_one_first_add<W>(x: W) where 1 < W { zext<W>(x <=u 1) + select(1 <u x, x, 0) => select(1 <u x, x, 1) }
+```
+
+- `zext<8>(p <=u 1) + select(1 <u p, p, 0)` → `select(1 <u p, p, 1)`
+
 ### core.recovery_shuffle
 
 #### `concat_low_zero` — rule
@@ -1412,6 +1500,54 @@ rule smax_ones_add<W>(x: W) where 1 < W { sext<W>(x <s ones) + select(ones <=s x
 ```
 
 - `sext<8>(p <s 255) + select(255 <=s p, p, 0)` → `smax(p, 255)`
+
+#### `smin_ones_first_or` — rule
+
+```text
+rule smin_ones_first_or<W>(x: W) where 1 < W { sext<W>(ones <=s x) | select(x <s ones, x, 0) => smin(x, ones) }
+```
+
+- `sext<8>(255 <=s p) | select(p <s 255, p, 0)` → `smin(p, 255)`
+
+#### `smin_ones_first_add` — rule
+
+```text
+rule smin_ones_first_add<W>(x: W) where 1 < W { sext<W>(ones <=s x) + select(x <s ones, x, 0) => smin(x, ones) }
+```
+
+- `sext<8>(255 <=s p) + select(p <s 255, p, 0)` → `smin(p, 255)`
+
+#### `smax_ones_first_or` — rule
+
+```text
+rule smax_ones_first_or<W>(x: W) where 1 < W { sext<W>(x <=s ones) | select(ones <s x, x, 0) => smax(x, ones) }
+```
+
+- `sext<8>(p <=s 255) | select(255 <s p, p, 0)` → `smax(p, 255)`
+
+#### `smax_ones_first_add` — rule
+
+```text
+rule smax_ones_first_add<W>(x: W) where 1 < W { sext<W>(x <=s ones) + select(ones <s x, x, 0) => smax(x, ones) }
+```
+
+- `sext<8>(p <=s 255) + select(255 <s p, p, 0)` → `smax(p, 255)`
+
+#### `umin_ones_first_add` — rule
+
+```text
+rule umin_ones_first_add<W>(x: W) where 1 < W { select(x <u ones, x, 0) + sext<W>(ones <=u x) => x }
+```
+
+- `select(p <u 255, p, 0) + sext<8>(255 <=u p)` → `p`
+
+#### `umin_ones_first_or` — rule
+
+```text
+rule umin_ones_first_or<W>(x: W) where 1 < W { select(x <u ones, x, 0) | sext<W>(ones <=u x) => x }
+```
+
+- `select(p <u 255, p, 0) | sext<8>(255 <=u p)` → `p`
 
 ### core.guarded_recovery
 
@@ -1545,6 +1681,16 @@ rule split_mask_add<W>(x: W, c: W, m: const W, n: const W) {
 
 - `(p & 240) + ((p & 15) + q)` → `p + q`
 
+#### `split_mask_or_or` — rule
+
+```text
+rule split_mask_or_or<W>(x: W, c: W, m: const W, n: const W) {
+        (x & m) | ((x & n) | c) => (x & k) | c let k: W = m | n
+    }
+```
+
+- `(p & 240) | ((p & 2) | 1)` → `(p & 242) | 1`
+
 #### `split_mask_sub` — rule
 
 ```text
@@ -1635,6 +1781,17 @@ rule recombine_extracted_field<N, K, M>(x: N + K, a: N + K) where M <= N, N + K 
 
 - `concat(trunc<4>(zext<8>(extract<4,3>(p)) + q), trunc<4>(p))` → `(p & 127) + (q << 4)`
 
+#### `recombine_extracted_field_or` — rule
+
+```text
+rule recombine_extracted_field_or<N, K, M>(x: N + K, a: N + K) where M <= N, N + K <= 512 {
+        concat(trunc<N>(zext<N + K>(extract<K, M>(x)) | a), trunc<K>(x))
+        => (x & lowmask(K + M)) | (a << K)
+    }
+```
+
+- `concat(trunc<4>(zext<8>(extract<4,3>(p)) | q), trunc<4>(p))` → `(p & 127) | (q << 4)`
+
 ### core.guarded_recovery_layout
 
 #### `shifted_masked_add` — rule
@@ -1647,6 +1804,30 @@ rule shifted_masked_add<W>(x: W, a: W, s: const W, k: const W) {
 ```
 
 - `(((p >>u 4) & 8) + q) << 4` → `(p & 128) + (q << 4)`
+
+#### `shifted_add_constant` — rule
+
+```text
+rule shifted_add_constant<W>(x: W, c: const W, k: const W) {
+        ((x >>u k) + c) << k => (x & keep) + d
+        let keep: W = ones << k
+        let d: W = c << k
+    }
+```
+
+- `((p >>u 4) + 3) << 4` → `(p & 240) + 48`
+
+#### `shifted_or_constant` — rule
+
+```text
+rule shifted_or_constant<W>(x: W, c: const W, k: const W) {
+        ((x >>u k) | c) << k => (x & keep) | d
+        let keep: W = ones << k
+        let d: W = c << k
+    }
+```
+
+- `((p >>u 4) | 3) << 4` → `(p & 240) | 48`
 
 #### `recombine_low_constant` — rule
 
@@ -1683,27 +1864,38 @@ rule add_constant_to_concat<H, L>(x: H + L, c: const L, d: const H + L) where H 
 
 - `concat(extract<7,1>(p), 112:7) + 16` → `(p & 128) + 128`
 
+#### `or_constant_to_concat` — rule
+
+```text
+rule or_constant_to_concat<H, L>(x: H + L, c: const L, d: const H + L) where H + L <= 512 {
+        concat(extract<L,H>(x), c) | d => (x & ~lowmask(L)) | k
+        let k: H + L = zext<H + L>(c) | d
+    }
+```
+
+- `concat(extract<7,1>(p), 112:7) | 3` → `(p & 128) | 115`
+
 ### core.guarded_recovery_mba_normalized
 
 #### `xor_from_distributed_double_or` — rule
 
 ```text
-rule xor_from_distributed_double_or<W>(x: W, c: const W, k: const W) {
-        ((x << 1) | k) - (x + c) => x ^ c if k == c << 1
+rule xor_from_distributed_double_or<W>(x: W, a: const W, c: const W) {
+        ((x | a) << 1) - (x + c) => x ^ c if (a << 1) == (c << 1)
     }
 ```
 
-- `((p << 1) | 2) - (p + 1)` → `p ^ 1`
+- `((p | 1) << 1) - (p + 129)` → `p ^ 129`
 
 #### `sum_from_distributed_double_or` — rule
 
 ```text
-rule sum_from_distributed_double_or<W>(x: W, c: const W, k: const W) {
-        ((x << 1) | k) - (x ^ c) => x + c if k == c << 1
+rule sum_from_distributed_double_or<W>(x: W, a: const W, c: const W) {
+        ((x | a) << 1) - (x ^ c) => x + c if (a << 1) == (c << 1)
     }
 ```
 
-- `((p << 1) | 2) - (p ^ 1)` → `p + 1`
+- `((p | 1) << 1) - (p ^ 129)` → `p + 129`
 
 #### `sum_from_vanishing_double_mask` — rule
 
@@ -1727,6 +1919,82 @@ rule add_aligned_to_concat<H, L>(a: H + L, x: H + L, c: const L) where H + L <= 
 ```
 
 - `(q << 4) + concat(extract<4,4>(p), 15:4)` → `concat(trunc<4>(q) + extract<4,4>(p), 15:4)`
+
+### core.shift_canonical
+
+#### `shl_mask_dead` — rule
+
+A mask that keeps every bit the shift keeps.
+
+```text
+rule shl_mask_dead<W>(x: W, c: const W, k: const W) {
+        (x & c) << k => x << k if (c | ~(ones >>u k)) == ones
+    }
+```
+
+- `(p & 63) << 2` → `p << 2`
+
+#### `and_shl_const` — rule
+
+```text
+rule and_shl_const<W>(x: W, k: const W, m: const W) {
+        (x << k) & m => (x & c) << k if one_use(x << k) let c: W = m >>u k
+    }
+```
+
+- `(p << 2) & 60` → `(p & 15) << 2`
+
+#### `and_double_const` — rule
+
+```text
+rule and_double_const<W>(x: W, m: const W) {
+        (x + x) & m => (x & c) << 1 if one_use(x + x) let c: W = m >>u 1
+    }
+```
+
+- `(p + p) & 30` → `(p & 15) << 1`
+
+#### `or_shl_const` — rule
+
+An or or xor moves too when it sets no bit the shift clears.
+
+```text
+rule or_shl_const<W>(x: W, k: const W, m: const W) {
+        (x << k) | m => (x | c) << k if (m & ~(ones << k)) == 0 && one_use(x << k) let c: W = m >>u k
+    }
+```
+
+- `(p << 2) | 12` → `(p | 3) << 2`
+
+#### `xor_shl_const` — rule
+
+```text
+rule xor_shl_const<W>(x: W, k: const W, m: const W) {
+        (x << k) ^ m => (x ^ c) << k if (m & ~(ones << k)) == 0 && one_use(x << k) let c: W = m >>u k
+    }
+```
+
+- `(p << 2) ^ 12` → `(p ^ 3) << 2`
+
+#### `or_double_const` — rule
+
+```text
+rule or_double_const<W>(x: W, m: const W) {
+        (x + x) | m => (x | c) << 1 if (m & 1) == 0 && one_use(x + x) let c: W = m >>u 1
+    }
+```
+
+- `(p + p) | 6` → `(p | 3) << 1`
+
+#### `xor_double_const` — rule
+
+```text
+rule xor_double_const<W>(x: W, m: const W) {
+        (x + x) ^ m => (x ^ c) << 1 if (m & 1) == 0 && one_use(x + x) let c: W = m >>u 1
+    }
+```
+
+- `(p + p) ^ 6` → `(p ^ 3) << 1`
 
 ### core.factor
 
@@ -2264,6 +2532,18 @@ rule sdiv_identity<W>(x: W, y: W) { sdiv(x, y) * y + srem(x, y) => x }
 ```
 
 - `sdiv(p, q) * q + srem(p, q)` → `p`
+
+#### `sdiv_pow2_identity` — rule
+
+The same by a power of two, whose product `mul_pow2` makes a shift.
+
+```text
+rule sdiv_pow2_identity<W>(x: W, c: const W, k: const W) {
+        (sdiv(x, c) << k) + srem(x, c) => x if is_pow2(c) && k == ctz(c)
+    }
+```
+
+- `(sdiv(p, 8) << 3) + srem(p, 8)` → `p`
 
 #### `sdiv_nonnegative_pow2` — rule
 

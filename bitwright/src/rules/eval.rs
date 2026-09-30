@@ -324,6 +324,8 @@ pub(crate) fn eval(
             let xv = bv(*x);
             Val::Bool(match p {
                 FactPred::Proves => ev(*x)?.truthy(),
+                // About sharing, not values.
+                FactPred::OneUse => true,
                 FactPred::NonZero => !xv?.is_zero(),
                 FactPred::Disjoint => bv_and(&xv?, &bv((*m)?)?).is_zero(),
                 FactPred::ZeroBits => bv_and(&xv?, &bv((*m)?)?).is_zero(),

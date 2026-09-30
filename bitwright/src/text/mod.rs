@@ -116,6 +116,7 @@ pub(crate) const RULE_WORDS: &[&str] = &[
     "zero_bits",
     "one_bits",
     "nonzero",
+    "one_use",
     "disjoint",
     "is_pow2",
     "is_lowmask",

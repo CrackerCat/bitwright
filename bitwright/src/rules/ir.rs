@@ -325,6 +325,11 @@ pub enum FactPred {
     FpFinite,
     /// `fp.nonzero(x)`: `x` is not a zero of either sign: `x & smax != 0`.
     FpNonZero,
+    /// `one_use(e)`: the node `e` matched (a parameter, or a subterm of the pattern written as
+    /// in the pattern) has one user, so the rewrite frees it. It is about sharing, not values:
+    /// the checker, the prover and the exports take it as true, and so does an application
+    /// outside the engine or under [`Sharing::Ignored`](crate::engine::Sharing::Ignored).
+    OneUse,
 }
 
 /// Predicates on constants, decided exactly.

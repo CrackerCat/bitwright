@@ -510,6 +510,23 @@ group core.recovery_select {
     rule merge_complementary_select_add<W>(c: 1, x: W, y: W) {
         select(c, x, 0) + select(c, 0, y) => select(c, x, y)
     }
+    // With `x` one or all ones, `select(c, x, 0)` is already `zext(c)` or `sext(c)`.
+    #[example("zext<8>(p == 0) | select(p == 0, 0, r)" => "select(p == 0, 1:8, r)")]
+    rule merge_complementary_zext_or<W>(c: 1, y: W) where 1 < W {
+        zext<W>(c) | select(c, 0, y) => select(c, 1, y)
+    }
+    #[example("zext<8>(p == 0) + select(p == 0, 0, r)" => "select(p == 0, 1:8, r)")]
+    rule merge_complementary_zext_add<W>(c: 1, y: W) where 1 < W {
+        zext<W>(c) + select(c, 0, y) => select(c, 1, y)
+    }
+    #[example("sext<8>(p == 0) | select(p == 0, 0, r)" => "select(p == 0, 255:8, r)")]
+    rule merge_complementary_sext_or<W>(c: 1, y: W) where 1 < W {
+        sext<W>(c) | select(c, 0, y) => select(c, ones, y)
+    }
+    #[example("sext<8>(p == 0) + select(p == 0, 0, r)" => "select(p == 0, 255:8, r)")]
+    rule merge_complementary_sext_add<W>(c: 1, y: W) where 1 < W {
+        sext<W>(c) + select(c, 0, y) => select(c, ones, y)
+    }
 }
 
 group core.recovery_canonical {
@@ -575,6 +592,19 @@ group core.recovery_select_one {
     rule umax_one_or<W>(x: W) where 1 < W { zext<W>(x == 0) | select(1 <=u x, x, 0) => umax(x, 1) }
     #[example("zext<8>(p == 0) + select(1 <=u p, p, 0)" => "umax(p, 1)")]
     rule umax_one_add<W>(x: W) where 1 < W { zext<W>(x == 0) + select(1 <=u x, x, 0) => umax(x, 1) }
+    // The same with the one first: ties select it rather than `x` (the same value).
+    #[example("zext<8>(1 <=s p) | select(p <s 1, p, 0)" => "smin(p, 1)")]
+    rule smin_one_first_or<W>(x: W) where 1 < W { zext<W>(1 <=s x) | select(x <s 1, x, 0) => smin(x, 1) }
+    #[example("zext<8>(1 <=s p) + select(p <s 1, p, 0)" => "smin(p, 1)")]
+    rule smin_one_first_add<W>(x: W) where 1 < W { zext<W>(1 <=s x) + select(x <s 1, x, 0) => smin(x, 1) }
+    #[example("zext<8>(p <=s 1) | select(1 <s p, p, 0)" => "smax(p, 1)")]
+    rule smax_one_first_or<W>(x: W) where 1 < W { zext<W>(x <=s 1) | select(1 <s x, x, 0) => smax(x, 1) }
+    #[example("zext<8>(p <=s 1) + select(1 <s p, p, 0)" => "smax(p, 1)")]
+    rule smax_one_first_add<W>(x: W) where 1 < W { zext<W>(x <=s 1) + select(1 <s x, x, 0) => smax(x, 1) }
+    #[example("zext<8>(p <=u 1) | select(1 <u p, p, 0)" => "select(1 <u p, p, 1)")]
+    rule umax_one_first_or<W>(x: W) where 1 < W { zext<W>(x <=u 1) | select(1 <u x, x, 0) => select(1 <u x, x, 1) }
+    #[example("zext<8>(p <=u 1) + select(1 <u p, p, 0)" => "select(1 <u p, p, 1)")]
+    rule umax_one_first_add<W>(x: W) where 1 < W { zext<W>(x <=u 1) + select(1 <u x, x, 0) => select(1 <u x, x, 1) }
 }
 
 group core.recovery_shuffle {
@@ -593,6 +623,20 @@ group core.recovery_select_ones {
     rule smax_ones_or<W>(x: W) where 1 < W { sext<W>(x <s ones) | select(ones <=s x, x, 0) => smax(x, ones) }
     #[example("sext<8>(p <s 255) + select(255 <=s p, p, 0)" => "smax(p, 255)")]
     rule smax_ones_add<W>(x: W) where 1 < W { sext<W>(x <s ones) + select(ones <=s x, x, 0) => smax(x, ones) }
+    // The same with all ones first: ties select it rather than `x` (the same value).
+    #[example("sext<8>(255 <=s p) | select(p <s 255, p, 0)" => "smin(p, 255)")]
+    rule smin_ones_first_or<W>(x: W) where 1 < W { sext<W>(ones <=s x) | select(x <s ones, x, 0) => smin(x, ones) }
+    #[example("sext<8>(255 <=s p) + select(p <s 255, p, 0)" => "smin(p, 255)")]
+    rule smin_ones_first_add<W>(x: W) where 1 < W { sext<W>(ones <=s x) + select(x <s ones, x, 0) => smin(x, ones) }
+    #[example("sext<8>(p <=s 255) | select(255 <s p, p, 0)" => "smax(p, 255)")]
+    rule smax_ones_first_or<W>(x: W) where 1 < W { sext<W>(x <=s ones) | select(ones <s x, x, 0) => smax(x, ones) }
+    #[example("sext<8>(p <=s 255) + select(255 <s p, p, 0)" => "smax(p, 255)")]
+    rule smax_ones_first_add<W>(x: W) where 1 < W { sext<W>(x <=s ones) + select(ones <s x, x, 0) => smax(x, ones) }
+    // `umin(x, ones)` is `x`, whichever of the two a tie selects.
+    #[example("select(p <u 255, p, 0) + sext<8>(255 <=u p)" => "p")]
+    rule umin_ones_first_add<W>(x: W) where 1 < W { select(x <u ones, x, 0) + sext<W>(ones <=u x) => x }
+    #[example("select(p <u 255, p, 0) | sext<8>(255 <=u p)" => "p")]
+    rule umin_ones_first_or<W>(x: W) where 1 < W { select(x <u ones, x, 0) | sext<W>(ones <=u x) => x }
 }
 
 // Remaining Valeria rules: guards are retained as facts, never erased.
@@ -651,6 +695,12 @@ group core.guarded_recovery {
     rule split_mask_add<W>(x: W, c: W, m: const W, n: const W) {
         (x & m) + ((x & n) + c) => (x & k) + c if (m & n) == 0 let k: W = m | n
     }
+    // A constant sharing no bit with `x & n` makes the inner add an or first (`add_disjoint`),
+    // and the outer one too when it is disjoint.
+    #[example("(p & 240) | ((p & 2) | 1)" => "(p & 242) | 1")]
+    rule split_mask_or_or<W>(x: W, c: W, m: const W, n: const W) {
+        (x & m) | ((x & n) | c) => (x & k) | c let k: W = m | n
+    }
     #[example("(p & 240) + ((p & 15) - q)" => "p - q")]
     rule split_mask_sub<W>(x: W, c: W, m: const W, n: const W) {
         (x & m) + ((x & n) - c) => x - c if (m | n) == ones && (m & n) == 0
@@ -690,6 +740,12 @@ group core.guarded_recovery_shuffle {
         concat(trunc<N>(zext<N + K>(extract<K, M>(x)) + a), trunc<K>(x))
         => (x & lowmask(K + M)) + (a << K)
     }
+    // As an or (what `add_disjoint` makes of a disjoint add), at every value.
+    #[example("concat(trunc<4>(zext<8>(extract<4,3>(p)) | q), trunc<4>(p))" => "(p & 127) | (q << 4)")]
+    rule recombine_extracted_field_or<N, K, M>(x: N + K, a: N + K) where M <= N, N + K <= 512 {
+        concat(trunc<N>(zext<N + K>(extract<K, M>(x)) | a), trunc<K>(x))
+        => (x & lowmask(K + M)) | (a << K)
+    }
 }
 
 group core.guarded_recovery_layout {
@@ -697,6 +753,19 @@ group core.guarded_recovery_layout {
     rule shifted_masked_add<W>(x: W, a: W, s: const W, k: const W) {
         (((x >>u k) & s) + a) << k => (x & keep) + (a << k)
         let keep: W = s << k
+    }
+    // With `s` keeping every bit of `x >>u k`, the mask is gone first (`and_mask_redundant`).
+    #[example("((p >>u 4) + 3) << 4" => "(p & 240) + 48")]
+    rule shifted_add_constant<W>(x: W, c: const W, k: const W) {
+        ((x >>u k) + c) << k => (x & keep) + d
+        let keep: W = ones << k
+        let d: W = c << k
+    }
+    #[example("((p >>u 4) | 3) << 4" => "(p & 240) | 48")]
+    rule shifted_or_constant<W>(x: W, c: const W, k: const W) {
+        ((x >>u k) | c) << k => (x & keep) | d
+        let keep: W = ones << k
+        let d: W = c << k
     }
     #[example("(((p >>u 4) + q) << 4) | 15" => "(p | 15) + (q << 4)")]
     rule recombine_low_constant<W>(x: W, a: W, c: const W, k: const W) {
@@ -715,16 +784,22 @@ group core.guarded_recovery_layout {
         concat(extract<L,H>(x), c) + d => (x & ~lowmask(L)) + k
         let k: H + L = zext<H + L>(c) + d
     }
+    #[example("concat(extract<7,1>(p), 112:7) | 3" => "(p & 128) | 115")]
+    rule or_constant_to_concat<H, L>(x: H + L, c: const L, d: const H + L) where H + L <= 512 {
+        concat(extract<L,H>(x), c) | d => (x & ~lowmask(L)) | k
+        let k: H + L = zext<H + L>(c) | d
+    }
 }
 
 group core.guarded_recovery_mba_normalized {
-    #[example("((p << 1) | 2) - (p + 1)" => "p ^ 1")]
-    rule xor_from_distributed_double_or<W>(x: W, c: const W, k: const W) {
-        ((x << 1) | k) - (x + c) => x ^ c if k == c << 1
+    // `((x << 1) | (c << 1))`, as `or_shl_const` writes it: `c`'s top bit may differ from `a`'s.
+    #[example("((p | 1) << 1) - (p + 129)" => "p ^ 129")]
+    rule xor_from_distributed_double_or<W>(x: W, a: const W, c: const W) {
+        ((x | a) << 1) - (x + c) => x ^ c if (a << 1) == (c << 1)
     }
-    #[example("((p << 1) | 2) - (p ^ 1)" => "p + 1")]
-    rule sum_from_distributed_double_or<W>(x: W, c: const W, k: const W) {
-        ((x << 1) | k) - (x ^ c) => x + c if k == c << 1
+    #[example("((p | 1) << 1) - (p ^ 129)" => "p + 129")]
+    rule sum_from_distributed_double_or<W>(x: W, a: const W, c: const W) {
+        ((x | a) << 1) - (x ^ c) => x + c if (a << 1) == (c << 1)
     }
     #[example("(p << 1) - (p ^ 128)" => "p + 128")]
     rule sum_from_vanishing_double_mask<W>(x: W, c: const W) {
@@ -737,6 +812,45 @@ group core.guarded_recovery_concat {
     rule add_aligned_to_concat<H, L>(a: H + L, x: H + L, c: const L) where H + L <= 512 {
         (a << L) + concat(extract<L,H>(x), c)
         => concat(trunc<H>(a) + extract<L,H>(x), c)
+    }
+}
+
+// A constant mask (or an or or xor) above a left shift moves below it: `(x << k) & m` and
+// `(x & (m >>u k)) << k` are one value, and the second is `2^k` times a bitwise term, which the
+// linear and MBA passes read (the linear pass writes `2·t` as `t + t`, so that spelling moves
+// too). Only when the shift has no other user: else it stays, and the move would add a node.
+// Patterns with a constant and a shift are written in this form; `check::preempted` finds the
+// ones that are not.
+group core.shift_canonical {
+    /// A mask that keeps every bit the shift keeps.
+    #[example("(p & 63) << 2" => "p << 2")]
+    rule shl_mask_dead<W>(x: W, c: const W, k: const W) {
+        (x & c) << k => x << k if (c | ~(ones >>u k)) == ones
+    }
+    #[example("(p << 2) & 60" => "(p & 15) << 2")]
+    rule and_shl_const<W>(x: W, k: const W, m: const W) {
+        (x << k) & m => (x & c) << k if one_use(x << k) let c: W = m >>u k
+    }
+    #[example("(p + p) & 30" => "(p & 15) << 1")]
+    rule and_double_const<W>(x: W, m: const W) {
+        (x + x) & m => (x & c) << 1 if one_use(x + x) let c: W = m >>u 1
+    }
+    /// An or or xor moves too when it sets no bit the shift clears.
+    #[example("(p << 2) | 12" => "(p | 3) << 2")]
+    rule or_shl_const<W>(x: W, k: const W, m: const W) {
+        (x << k) | m => (x | c) << k if (m & ~(ones << k)) == 0 && one_use(x << k) let c: W = m >>u k
+    }
+    #[example("(p << 2) ^ 12" => "(p ^ 3) << 2")]
+    rule xor_shl_const<W>(x: W, k: const W, m: const W) {
+        (x << k) ^ m => (x ^ c) << k if (m & ~(ones << k)) == 0 && one_use(x << k) let c: W = m >>u k
+    }
+    #[example("(p + p) | 6" => "(p | 3) << 1")]
+    rule or_double_const<W>(x: W, m: const W) {
+        (x + x) | m => (x | c) << 1 if (m & 1) == 0 && one_use(x + x) let c: W = m >>u 1
+    }
+    #[example("(p + p) ^ 6" => "(p ^ 3) << 1")]
+    rule xor_double_const<W>(x: W, m: const W) {
+        (x + x) ^ m => (x ^ c) << 1 if (m & 1) == 0 && one_use(x + x) let c: W = m >>u 1
     }
 }
 
@@ -924,6 +1038,11 @@ group core.division {
     /// Likewise signed (for 0: a quotient of ±1 times 0, and the remainder `x`).
     #[example("sdiv(p, q) * q + srem(p, q)" => "p")]
     rule sdiv_identity<W>(x: W, y: W) { sdiv(x, y) * y + srem(x, y) => x }
+    /// The same by a power of two, whose product `mul_pow2` makes a shift.
+    #[example("(sdiv(p, 8) << 3) + srem(p, 8)" => "p")]
+    rule sdiv_pow2_identity<W>(x: W, c: const W, k: const W) {
+        (sdiv(x, c) << k) + srem(x, c) => x if is_pow2(c) && k == ctz(c)
+    }
     /// Signed division of a value the facts show nonnegative by a positive power of two is a
     /// logical right shift.
     #[example("sdiv(p >>u 1, 8)" => "p >>u 1 >>u 3")]
